@@ -31,13 +31,21 @@ Installed plugin: kedify
 k kedify --version
 ```
 
+### Update
+
+```
+kubectl kedify -v
+kubectl krew uninstall kedify && kubectl krew install --manifest-url=https://github.com/jkremser/kubectl-kedify/raw/main/.krew.yaml
+kubectl kedify -v
+```
+
 ### Requirements
 
-This plugin requires couple of binaries to work properly.
+This plugin requires couple of binaries to work properly. `kubecolor` is optional, but recommended.
 
 Mac:
 ```bash
-brew install bat curl figlet fzf yq jq
+brew install bat curl figlet fzf kubecolor yq jq
 ```
 
 Linux:
@@ -53,11 +61,3 @@ apt-get install bat curl figlet fzf jq
 ```
 
 and for `yq` consult the [readme](https://github.com/mikefarah/yq#install).
-
-### Update
-
-```
-kubectl kedify -v
-kubectl krew uninstall kedify && kubectl krew install --manifest-url=https://github.com/jkremser/kubectl-kedify/raw/main/.krew.yaml
-kubectl kedify -v
-```

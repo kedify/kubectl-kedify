@@ -13,7 +13,7 @@ export RES="\e[0m"
 main() {
     [[ $# -lt 1 ]] && print_usage && exit 1
     for c in bat curl figlet fzf kubectl yq jq; do
-        ! command -v "${c}" &> /dev/null && echo "Install "${c}", this script needs it" && exit 2
+        ! command -v "${c}" &> /dev/null && echo -e "Install ${c}, this script needs it.\n       ^^^^^^\n\n\n$(cat ${DIR}/README.md | grep -A99 '### Requirements')" && exit 2
     done
     
     [[ $1 == install ]] || [[ $1 == i ]]   && { install $@ ; exit 0; }

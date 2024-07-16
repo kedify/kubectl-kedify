@@ -6,14 +6,14 @@ DIR="${DIR:-$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )}"
 API=${TEMPLATE_FILE:-"https://api.dev.kedify.io"}
 HELPERS=${DIR}/preview-functions.sh
 AUTOSCALABLE_RESOURCE_KIND=(ingress service virtualservice httproute)
-TEMPLATE_FILE=${TEMPLATE_FILE:-"${DIR}/hso.yaml"}
+TEMPLATE_FILE=${TEMPLATE_FILE:-"hso.yaml"}
 export COL="\e[2;35;49m"
 export RES="\e[0m"
 
 main() {
     [[ $# -lt 1 ]] && print_usage && exit 1
     for c in bat curl figlet fzf kubectl yq jq; do
-        ! command -v "${c}" &> /dev/null && echo -e "Install ${c}, this script needs it.\n       ^^^^^^\n\n\n$(cat ${DIR}/README.md | grep -A99 '### Requirements')" && exit 2
+        ! command -v "${c}" &> /dev/null && echo -e "Install ${c}, this script needs it.\n       ^^^^^^\n\n\n$(cat README.md | grep -A99 '### Requirements')" && exit 2
     done
     
     [[ $1 == install ]] || [[ $1 == i ]]   && { install $@ ; exit 0; }

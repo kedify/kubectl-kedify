@@ -16,9 +16,9 @@ spec:
             values:
               - darwin
               - linux
-      uri: https://github.com/jkremser/kubectl-kedify/archive/refs/tags/v0.0.1.zip
+      uri: https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/v0.0.1.zip
       # 'sha256' is the sha256sum of the zip from url above (shasum -a 256 ..zip)
-      sha256: 0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5
+      sha256: 86aae2e599dc069a34fabdce8697f661151f4c8db77fba7941d9d168e90a583a
       # {{addURIAndSha "https://github.com/jkremser/kubectl-kedify/releases/download/{{ .TagName }}/kubectl-kedify{{ .TagName }}.tar.gz" .TagName }}
       files:
         - from: "kubectl-kedify-*/kubectl-kedify"

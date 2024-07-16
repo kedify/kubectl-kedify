@@ -21,8 +21,8 @@ jobs:
       - name: Update the kubectl plugin manifest
         run: |
           yq -i '.spec.version = "${{ github.event.release.tag_name }}"' .krew.yaml
-          yq -i '.spec.platforms[0].uri = "https://github.com/${{ env.GITHUB_ACTION_REPOSITORY }}/archive/${{ github.ref }}.zip"' .krew.yaml
-          _sha256=$(curl -Ls https://github.com/${{ env.GITHUB_ACTION_REPOSITORY }}/archive/${{ github.ref }}.zip  -o- | shasum -a 256 | cut -d' ' -f1)
+          yq -i '.spec.platforms[0].uri = "https://github.com/${{ env.GITHUB_REPOSITORY }}/archive/${{ github.ref }}.zip"' .krew.yaml
+          _sha256=$(curl -Ls https://github.com/${{ env.GITHUB_REPOSITORY }}/archive/${{ github.ref }}.zip  -o- | shasum -a 256 | cut -d' ' -f1)
           yq -i '.spec.platforms[0].sha256 = "'${_sha256}'"' .krew.yaml
           echo -e "Manifest:\n\n"
           cat .krew.yaml
@@ -46,7 +46,7 @@ jobs:
 
             This automated PR was created by [this action][1].
 
-            [1]: https://github.com/${{ env.GITHUB_ACTION_REPOSITORY }}/actions/runs/${{ github.run_id }}
+            [1]: https://github.com/${{ env.GITHUB_REPOSITORY }}/actions/runs/${{ github.run_id }}
 
       - name: Check PR
         run: |

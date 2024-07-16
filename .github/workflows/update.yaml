@@ -11,6 +11,8 @@ permissions:
 jobs:
   kubectl-pr:
     runs-on: ubuntu-20.04
+    env:
+      REPO: jkremser/kubectl-kedify
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@ebacdc22ef6c2cfb85ee5ded8f2e640f4c776dd5 # v2.0.0
@@ -21,8 +23,8 @@ jobs:
       - name: Update the kubectl plugin manifest
         run: |
           yq -i '.spec.version = "${{ github.event.release.tag_name }}"' .krew.yaml
-          yq -i '.spec.platforms[0].uri = "https://github.com/${{ env.GITHUB_REPOSITORY }}/archive/${{ github.ref }}.zip"' .krew.yaml
-          _sha256=$(curl -Ls https://github.com/${{ env.GITHUB_REPOSITORY }}/archive/${{ github.ref }}.zip  -o- | shasum -a 256 | cut -d' ' -f1)
+          yq -i '.spec.platforms[0].uri = "https://github.com/${{ env.REPO }}/archive/${{ github.ref }}.zip"' .krew.yaml
+          _sha256=$(curl -Ls https://github.com/${{ env.REPO }}/archive/${{ github.ref }}.zip  -o- | shasum -a 256 | cut -d' ' -f1)
           yq -i '.spec.platforms[0].sha256 = "'${_sha256}'"' .krew.yaml
           echo -e "Manifest:\n\n"
           cat .krew.yaml
@@ -36,6 +38,7 @@ jobs:
           delete-branch: true
           base: main
           signoff: true
+          # don't forget to set this up
           token: ${{ secrets.RELEASER_TOKEN }}
           body: |
             :package: Updating kubectl plugin :package:
@@ -46,7 +49,7 @@ jobs:
 
             This automated PR was created by [this action][1].
 
-            [1]: https://github.com/${{ env.GITHUB_REPOSITORY }}/actions/runs/${{ github.run_id }}
+            [1]: https://github.com/${{ env.REPO }}/actions/runs/${{ github.run_id }}
 
       - name: Check PR
         run: |

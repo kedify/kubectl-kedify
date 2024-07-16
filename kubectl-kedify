@@ -1,0 +1,183 @@
+#!/bin/bash
+set -e
+
+DIR="${DIR:-$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )}"
+# API=${TEMPLATE_FILE:-"https://api.kedify.io"}
+API=${TEMPLATE_FILE:-"https://api.dev.kedify.io"}
+HELPERS=${DIR}/preview-functions.sh
+AUTOSCALABLE_RESOURCE_KIND=(ingress service virtualservice httproute)
+TEMPLATE_FILE=${TEMPLATE_FILE:-"${DIR}/hso.yaml"}
+export COL="\e[2;35;49m"
+export RES="\e[0m"
+
+main() {
+    [[ $# -lt 1 ]] && print_usage && exit 1
+    for c in bat curl figlet fzf kubectl yq jq; do
+        ! command -v "${c}" &> /dev/null && echo "Install "${c}", this script needs it" && exit 2
+    done
+    
+    [[ $1 == install ]] || [[ $1 == i ]]   && { install $@ ; exit 0; }
+    [[ $1 == delete ]] || [[ $1 == d ]]    && { delete ; exit 0; }
+    [[ $1 == status ]] || [[ $1 == s ]]    && { status ; exit 0; }
+    [[ $1 == logs ]] || [[ $1 == l ]]      && { shift 1 ; logs $@ ; exit 0; }
+    [[ $1 == autoscale ]] || [[ $1 == a ]] && {
+        [[ $2 == ingress ]] || [[ $2 == ing ]] || [[ $2 == i ]] && { autoscale_ing ; exit 0; }
+        autoscale ; exit 0
+    }
+    [[ $1 == -v ]] || [[ $1 == --version ]] && { print_version ; exit 0; }
+    print_usage
+}
+
+autoscale() {
+    AUTOSCALABLE_RESOURCE_KIND=$(printf "%s\n" "${AUTOSCALABLE_RESOURCE_KIND[@]}" | \
+     tr ' ' '\n' | \
+     fzf --header "Select a kind that represents the applications you would like to autoscale based on incoming http traffic" --prompt='λ' --cycle --preview-window top:80% \
+      --preview "printf '${COL}'; figlet -f big Kedify.io;printf '${RES}'; echo Kind: {}; kubectl get {} -A")
+    [[ ${AUTOSCALABLE_RESOURCE_KIND} == "ingress" ]] && {
+        autoscale_ing
+    }
+}
+
+autoscale_ing() {
+    AUTOSCALABLE_RESOURCE_AND_NS=$(kubectl get ${AUTOSCALABLE_RESOURCE_KIND} --no-headers -o custom-columns=":metadata.namespace,:metadata.name" -A | \
+    fzf --header "Select ${AUTOSCALABLE_RESOURCE_KIND} that represents the applications you would like to autoscale based on incoming http traffic" --prompt='λ' --cycle --preview-window top:80% \
+      --preview "source ${HELPERS} && printf '${COL}'; figlet -f big Kedify.io;printf '${RES}'; preview_ing {} ${AUTOSCALABLE_RESOURCE_KIND};")
+    export AUTOSCALABLE_RESOURCE=$(echo ${AUTOSCALABLE_RESOURCE_AND_NS} | awk '{ print $2}')
+    export NS=$(echo ${AUTOSCALABLE_RESOURCE_AND_NS} | awk '{ print $1}')
+
+    export HSO_NAME=${AUTOSCALABLE_RESOURCE}
+    export HSO_HOST=$(kubectl get -n${NS} ${AUTOSCALABLE_RESOURCE_KIND} ${AUTOSCALABLE_RESOURCE} -ojson | jq -r '.spec.rules[0].host')
+    export HSO_SVC=$(kubectl get -n${NS} ${AUTOSCALABLE_RESOURCE_KIND} ${AUTOSCALABLE_RESOURCE} -ojson | jq -r '.spec.rules[0].http.paths[0].backend.service.name')
+    export HSO_PORT=$(kubectl get -n${NS} ${AUTOSCALABLE_RESOURCE_KIND} ${AUTOSCALABLE_RESOURCE} -ojson | jq -r '.spec.rules[0].http.paths[0].backend.service.port.number')
+    ask_for_details
+    check_result "${TEMPLATE_FILE}" "${AUTOSCALABLE_RESOURCE_KIND}" "${AUTOSCALABLE_RESOURCE}"
+}
+
+ask_for_details() {
+    export MAX=$(for x in {0..20}; do echo $x; done | fzf --prompt='λ' --cycle --header "Max number of replicas?")
+}
+
+check_result() {
+    [[ $# -lt 3 ]] && echo "usage: $0 <file_path> <kind> <resource>" && exit 1
+    file_path="$1"
+    cat ${file_path} | envsubst | bat -lyaml --file-name="hso.yaml"
+    printf "Are you sure to create the HTTPScaledObject for $2 $3 on cluster ${COL}'$(kubectl config current-context)'${RES}\nHit 'e' for modifying the manifest further.\nHit 'p' for printing the manifests to stdout."
+	echo "[y/N/e/p]?"
+	read -n1 _resp
+	[[ $_resp =~ [yY] ]] && {
+        # here we apply the manifests
+        cat ${file_path} | envsubst | kubectl apply -f -
+    }
+    [[ $_resp =~ [eE] ]] && {
+        tmp="$(mktemp).yaml"
+        cat ${file_path} | envsubst > ${tmp}
+        ${EDITOR} ${tmp}
+        check_result ${tmp} ${2} ${3}
+    }
+    [[ $_resp =~ [pP] ]] && {
+        cat ${file_path} | envsubst
+    }
+    exit 0
+}
+
+install() {
+    [[ $2 == --email ]] && [[ $# -gt 2 ]] && {
+        export EMAIL="${3}"
+    } || {
+        # ask about email
+        echo "Please enter your email address:"
+        read -e EMAIL
+        export EMAIL
+        [[ -z $EMAIL ]] && echo "Email can't be empty" && exit 1
+    }
+    set +e
+    AGENT_ID=$(curl -s --request POST --data '{"email": "'"${EMAIL}"'"}' "${API}"/onboarding/create | jq -e -r '.agent_id')
+    retVal=$?
+    [ $retVal -ne 0 ] && echo "Can't create JWT token: $(curl -s --request POST --data '{"email": "'"${EMAIL}"'"}' "${API}"/onboarding/create|jq -C)" && exit 1
+    set -e
+    TOKEN=$(curl -s --request POST --data '{"email": "'"${EMAIL}"'"}' "${API}"/onboarding/create | jq -r '.token')
+    printf "Do you want to install Kedify on cluster ${COL}'$(kubectl config current-context)'${RES}\nHit 'p' for showing the manifests only."
+	echo "[y/N/p]?"
+	read -n1 _resp
+	[[ $_resp =~ [yY] ]] && {
+        # here we apply the manifests
+        kubectl apply -f "${API}/onboarding/agent/${AGENT_ID}?token=${TOKEN}"
+    }
+    [[ $_resp =~ [pP] ]] && {
+        curl -s "${API}/onboarding/agent/${AGENT_ID}?token=${TOKEN}" | bat --color=always -lyaml
+    }
+    exit 0
+}
+
+status() {
+    clear
+    figlet kedify status
+    echo -e "\nKedify:\n------"
+    kubecolor get kedifyconfigurations kedify -owide -nkeda 2>/dev/null || kubectl get kedify kedify -owide -nkeda
+    echo -e "\n\nDetailed status\n---------------"
+    kubectl get kedifyconfigurations kedify -nkeda -oyaml | yq '.status'
+    echo -e "\n\nPods running in namespace 'keda'\n--------------------------------"
+    kubecolor get pods -nkeda 2>/dev/null || kubectl get pods -nkeda
+    kubectl tree --version &> /dev/null && {
+        echo -e "\n\nKedify deployments\n------------------"
+        kubecolor tree kedifyconfigurations.install.kedify.io kedify -n keda 2>/dev/null || kubectl tree kedifyconfigurations.install.kedify.io kedify -n keda
+    }
+}
+
+logs() {
+    figlet logs
+    kubecolor logs -lcontrol-plane=kedify-agent -nkeda --tail=-1 $@ 2>/dev/null || kubectl logs -lcontrol-plane=kedify-agent -nkeda --tail=-1 $@
+}
+
+delete() {
+    printf "Do you want to uninstall Kedify on cluster ${COL}'$(kubectl config current-context)'${RES}\n"
+	echo "[y/N]?"
+	read -n1 _resp
+	[[ $_resp =~ [yY] ]] && {
+        echo -e "\nDeleting Kedify.."
+        kubectl delete kedifyconfigurations kedify -nkeda
+    }
+}
+
+print_usage() {
+    cat << EOF
+
+Usage: kubectl kedify (i)nstall | (d)elete | (s)tatus | (a)utoscale
+
+Available commands:
+   install,   i           Installs the Kedify agent
+   delete,    d           Uninstalls the Kedify agent
+   logs,      l           Prints the logs of Kedify agent
+   status,    s           Prints the status of Kedify agent
+   autoscale, a           Runs the interactive mode for creating HTTPScaledObject
+
+   --version, -v          Prints the version
+
+Examples:
+   kubectl kedify install                      ... installs the Kedify agent in interactive mode
+   kubectl kedify i --email john.doe@email.com ... installs the Kedify agent w/o asking
+   kubectl kedify autoscale                    ... will ask questions
+   kubectl kedify autoscale ingress            ... will ask questions about what ingress to autoscale
+   kubectl kedify l -f                         ... prints the logs of Kedify agent and follows them
+   kubectl kedify a ing                        ... same as ^
+
+Other env vars that can be passed:
+   API                                         ... defaults to https://api.kedify.io
+
+EOF
+}
+
+print_version() {
+  [ "$(uname)" == "Darwin" ] && {
+    cat $(dirname `readlink $0 2> /dev/null` 2> /dev/null)/VERSION 2> /dev/null
+  } || {
+    cat $(dirname `readlink -f $0`)/VERSION
+  }
+}
+
+cleanup() {
+    exit 0
+}
+trap cleanup EXIT 1 2 3 6
+
+main $@

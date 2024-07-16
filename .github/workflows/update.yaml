@@ -1,0 +1,54 @@
+name: Release kubectl plugin
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+jobs:
+  kubectl-pr:
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ebacdc22ef6c2cfb85ee5ded8f2e640f4c776dd5 # v2.0.0
+        with:
+          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+
+      - uses: actions/checkout@93ea575cb5d8a053eaa0ac8fa3b40d7e05a33cc8 # tag=v3.1.0
+      - name: Update the kubectl plugin manifest
+        run: |
+          yq -i '.spec.version = "${{ github.event.release.tag_name }}"' .krew.yaml
+          yq -i '.spec.platforms[0].uri = "https://github.com/${{ env.GITHUB_ACTION_REPOSITORY }}/archive/${{ github.ref }}.zip"' .krew.yaml
+          _sha256=$(curl -Ls https://github.com/${{ env.GITHUB_ACTION_REPOSITORY }}/archive/${{ github.ref }}.zip  -o- | shasum -a 256 | cut -d' ' -f1)
+          yq -i '.spec.platforms[0].sha256 = "'${_sha256}'"' .krew.yaml
+          echo -e "Manifest:\n\n"
+          cat .krew.yaml
+
+      - name: Create Pull Request
+        id: cpr
+        uses: peter-evans/create-pull-request@153407881ec5c347639a548ade7d8ad1d6740e38 # v5
+        with:
+          title: "Update Kubectl Plugin - ${{ github.event.release.tag_name }}"
+          branch: kubectl-plugin-${{ github.event.release.tag_name }}
+          delete-branch: true
+          base: main
+          signoff: true
+          token: ${{ secrets.RELEASER_TOKEN }}
+          body: |
+            :package: Updating kubectl plugin :package:
+
+            new yaml manifest for release `${{ github.event.release.tag_name }}`
+            Make sure the version is correctly set in VERSION file.
+            This needs to be done before creating the tag for release.
+
+            This automated PR was created by [this action][1].
+
+            [1]: https://github.com/${{ env.GITHUB_ACTION_REPOSITORY }}/actions/runs/${{ github.run_id }}
+
+      - name: Check PR
+        run: |
+          echo "Pull Request Number - ${{ steps.cpr.outputs.pull-request-number }}"
+          echo "Pull Request URL - ${{ steps.cpr.outputs.pull-request-url }}"

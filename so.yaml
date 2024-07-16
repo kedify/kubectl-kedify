@@ -1,0 +1,25 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: http-demo-scaledobject
+  labels:
+    deploymentName: http-demo-deployment
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: http-demo-deployment
+  cooldownPeriod: 5
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  triggers:
+    - type: kedify-http
+      metadata:
+        hosts: www.my-app.com
+        pathPrefixes: '/'
+        service: http-demo-service
+        port: '8080'
+        scalingMetric: requestRate
+        targetValue: '10'
+        granularity: '1s'
+        window: '1m0s'

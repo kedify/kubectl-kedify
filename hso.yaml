@@ -1,0 +1,20 @@
+kind: HTTPScaledObject
+apiVersion: http.keda.sh/v1alpha1
+metadata:
+  name: ${HSO_NAME}-hso
+spec:
+  hosts:
+    - ${HSO_HOST}
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ${DEPLOYMENT_NAME}
+    service: ${HSO_SVC}
+    port: ${HSO_PORT}
+  replicas:
+    min: 0
+    max: ${MAX}
+  scalingMetric:
+    requestRate:
+      targetValue: 10
+  scaledownPeriod: 5

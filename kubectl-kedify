@@ -12,9 +12,13 @@ export RES="\e[0m"
 
 main() {
     [[ $# -lt 1 ]] && print_usage && exit 1
-    for c in bat curl figlet fzf kubectl yq jq; do
+    for c in curl figlet fzf kubectl yq jq; do
         ! command -v "${c}" &> /dev/null && echo -e "Install ${c}, this script needs it.\n       ^^^^^^\n\n\n$(cat README.md | grep -A99 '### Requirements')" && exit 2
     done
+    # bat is special on ubuntu
+    command -v "bat" &> /dev/null || command -v "batcat" &> /dev/null || echo -e "Install bat this script needs it.\n\n  consult https://github.com/sharkdp/bat?tab=readme-ov-file#installation"
+    export BAT=$(command -v "bat" &> /dev/null && echo "bat" || echo "batcat")
+    export KUBECTL=$(command -v "kubecolor" &> /dev/null && echo "kubecolor" || echo "kubectl")
     
     [[ $1 == install ]] || [[ $1 == i ]]   && { install $@ ; exit 0; }
     [[ $1 == delete ]] || [[ $1 == d ]]    && { delete ; exit 0; }
@@ -60,7 +64,7 @@ ask_for_details() {
 check_result() {
     [[ $# -lt 3 ]] && echo "usage: $0 <file_path> <kind> <resource>" && exit 1
     file_path="$1"
-    cat ${file_path} | envsubst | bat -lyaml --file-name="hso.yaml"
+    cat ${file_path} | envsubst | ${BAT} -lyaml --file-name="hso.yaml"
     printf "Are you sure to create the HTTPScaledObject for $2 $3 on cluster ${COL}'$(kubectl config current-context)'${RES}\nHit 'e' for modifying the manifest further.\nHit 'p' for printing the manifests to stdout."
 	echo "[y/N/e/p]?"
 	read -n1 _resp
@@ -96,15 +100,17 @@ install() {
     [ $retVal -ne 0 ] && echo "Can't create JWT token: $(curl -s --request POST --data '{"email": "'"${EMAIL}"'"}' "${API}"/onboarding/create|jq -C)" && exit 1
     set -e
     TOKEN=$(curl -s --request POST --data '{"email": "'"${EMAIL}"'"}' "${API}"/onboarding/create | jq -r '.token')
-    printf "Do you want to install Kedify on cluster ${COL}'$(kubectl config current-context)'${RES}\nHit 'p' for showing the manifests only."
-	echo "[y/N/p]?"
-	read -n1 _resp
+    [[ $- == *i* ]] && _resp="y" || { # ask only if shell is interactive
+        printf "Do you want to install Kedify on cluster ${COL}'$(kubectl config current-context)'${RES}\nHit 'p' for showing the manifests only."
+        echo "[y/N/p]?"
+        read -n1 _resp
+    }
 	[[ $_resp =~ [yY] ]] && {
         # here we apply the manifests
         kubectl apply -f "${API}/onboarding/agent/${AGENT_ID}?token=${TOKEN}"
     }
     [[ $_resp =~ [pP] ]] && {
-        curl -s "${API}/onboarding/agent/${AGENT_ID}?token=${TOKEN}" | bat --color=always -lyaml
+        curl -s "${API}/onboarding/agent/${AGENT_ID}?token=${TOKEN}" | ${BAT} --color=always -lyaml
     }
     exit 0
 }
@@ -113,20 +119,20 @@ status() {
     clear
     figlet kedify status
     echo -e "\nKedify:\n------"
-    kubecolor get kedifyconfigurations kedify -owide -nkeda 2>/dev/null || kubectl get kedify kedify -owide -nkeda
+    ${KUBECTL} get kedifyconfigurations kedify -owide -nkeda
     echo -e "\n\nDetailed status\n---------------"
-    kubectl get kedifyconfigurations kedify -nkeda -oyaml | yq '.status'
+    ${KUBECTL} get kedifyconfigurations kedify -nkeda -oyaml | yq '.status'
     echo -e "\n\nPods running in namespace 'keda'\n--------------------------------"
-    kubecolor get pods -nkeda 2>/dev/null || kubectl get pods -nkeda
-    kubectl tree --version &> /dev/null && {
+    ${KUBECTL} get pods -nkeda
+    ${KUBECTL} tree --version &> /dev/null && {
         echo -e "\n\nKedify deployments\n------------------"
-        kubecolor tree kedifyconfigurations.install.kedify.io kedify -n keda 2>/dev/null || kubectl tree kedifyconfigurations.install.kedify.io kedify -n keda
+        ${KUBECTL} tree kedifyconfigurations.install.kedify.io kedify -n keda
     }
 }
 
 logs() {
     figlet logs
-    kubecolor logs -lcontrol-plane=kedify-agent -nkeda --tail=-1 $@ 2>/dev/null || kubectl logs -lcontrol-plane=kedify-agent -nkeda --tail=-1 $@
+    ${KUBECTL} logs -lcontrol-plane=kedify-agent -nkeda --tail=-1 $@
 }
 
 delete() {
@@ -135,7 +141,7 @@ delete() {
 	read -n1 _resp
 	[[ $_resp =~ [yY] ]] && {
         echo -e "\nDeleting Kedify.."
-        kubectl delete kedifyconfigurations kedify -nkeda
+        ${KUBECTL} delete kedifyconfigurations kedify -nkeda
     }
 }
 

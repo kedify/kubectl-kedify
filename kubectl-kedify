@@ -21,7 +21,7 @@ main() {
     export KUBECTL=$(command -v "kubecolor" &> /dev/null && echo "kubecolor" || echo "kubectl")
     
     [[ $1 == install ]] || [[ $1 == i ]]   && { install $@ ; exit 0; }
-    [[ $1 == delete ]] || [[ $1 == d ]]    && { delete ; exit 0; }
+    [[ $1 == delete ]] || [[ $1 == d ]]    && { delete $@ ; exit 0; }
     [[ $1 == status ]] || [[ $1 == s ]]    && { status ; exit 0; }
     [[ $1 == logs ]] || [[ $1 == l ]]      && { shift 1 ; logs $@ ; exit 0; }
     [[ $1 == autoscale ]] || [[ $1 == a ]] && {
@@ -66,9 +66,9 @@ check_result() {
     file_path="$1"
     cat ${file_path} | envsubst | ${BAT} -lyaml --file-name="hso.yaml"
     printf "Are you sure to create the HTTPScaledObject for $2 $3 on cluster ${COL}'$(kubectl config current-context)'${RES}\nHit 'e' for modifying the manifest further.\nHit 'p' for printing the manifests to stdout."
-	echo "[y/N/e/p]?"
-	read -n1 _resp
-	[[ $_resp =~ [yY] ]] && {
+    echo "[y/N/e/p]?"
+    read -n1 _resp
+    [[ $_resp =~ [yY] ]] && {
         # here we apply the manifests
         cat ${file_path} | envsubst | kubectl apply -f -
     }
@@ -100,12 +100,14 @@ install() {
     [ $retVal -ne 0 ] && echo "Can't create JWT token: $(curl -s --request POST --data '{"email": "'"${EMAIL}"'"}' "${API}"/onboarding/create|jq -C)" && exit 1
     set -e
     TOKEN=$(curl -s --request POST --data '{"email": "'"${EMAIL}"'"}' "${API}"/onboarding/create | jq -r '.token')
-    [[ $- == *i* ]] && _resp="y" || { # ask only if shell is interactive
+    if [[ $- == *i* ]] || [[ "${@}" =~ \ -y( |$) ]]; then
+        _resp="y"
+    else # ask only if shell is interactive or -y was passed
         printf "Do you want to install Kedify on cluster ${COL}'$(kubectl config current-context)'${RES}\nHit 'p' for showing the manifests only."
         echo "[y/N/p]?"
         read -n1 _resp
-    }
-	[[ $_resp =~ [yY] ]] && {
+    fi
+    [[ $_resp =~ [yY] ]] && {
         # here we apply the manifests
         kubectl apply -f "${API}/onboarding/agent/${AGENT_ID}?token=${TOKEN}"
     }
@@ -136,10 +138,14 @@ logs() {
 }
 
 delete() {
-    printf "Do you want to uninstall Kedify on cluster ${COL}'$(kubectl config current-context)'${RES}\n"
-	echo "[y/N]?"
-	read -n1 _resp
-	[[ $_resp =~ [yY] ]] && {
+    if [[ $- == *i* ]] || [[ "${@}" =~ \ -y( |$) ]]; then
+        _resp="y"
+    else # ask only if shell is interactive or -y was passed
+        printf "Do you want to uninstall Kedify on cluster ${COL}'$(kubectl config current-context)'${RES}\n"
+        echo "[y/N]?"
+        read -n1 _resp
+    fi
+    [[ $_resp =~ [yY] ]] && {
         echo -e "\nDeleting Kedify.."
         ${KUBECTL} delete kedifyconfigurations kedify -nkeda
     }
@@ -160,12 +166,13 @@ Available commands:
    --version, -v          Prints the version
 
 Examples:
-   kubectl kedify install                      ... installs the Kedify agent in interactive mode
-   kubectl kedify i --email john.doe@email.com ... installs the Kedify agent w/o asking
-   kubectl kedify autoscale                    ... will ask questions
-   kubectl kedify autoscale ingress            ... will ask questions about what ingress to autoscale
-   kubectl kedify l -f                         ... prints the logs of Kedify agent and follows them
-   kubectl kedify a ing                        ... same as ^
+   kubectl kedify install                         ... installs the Kedify agent in interactive mode
+   kubectl kedify i --email john.doe@email.com -y ... installs the Kedify agent w/o asking
+   kubectl kedify d -y                            ... deletes the Kedify agent w/o asking
+   kubectl kedify autoscale                       ... will ask questions
+   kubectl kedify autoscale ingress               ... will ask questions about what ingress to autoscale
+   kubectl kedify l -f                            ... prints the logs of Kedify agent and follows them
+   kubectl kedify a ing                           ... same as ^
 
 Other env vars that can be passed:
    API                                         ... defaults to https://api.kedify.io

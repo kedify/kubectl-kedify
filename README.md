@@ -11,7 +11,7 @@ Simple TUI based shell script for installing and interfacing with Kedify.
 Having krew [installed](https://krew.sigs.k8s.io/docs/user-guide/setup/install/), just run:
 
 ```bash
-kubectl krew install --manifest-url=https://github.com/jkremser/kubectl-kedify/raw/main/.krew.yaml
+kubectl krew install --manifest-url=https://github.com/kedify/kubectl-kedify/raw/main/.krew.yaml
 ```
 
 ```bash
@@ -22,7 +22,7 @@ Installed plugin: kedify
  | Use this plugin:
  | 	kubectl kedify
  | Documentation:
- | 	https://github.com/jkremser/kubectl-kedify
+ | 	https://github.com/kedify/kubectl-kedify
 /
 ```
 ### Usage
@@ -35,7 +35,7 @@ k kedify --version
 
 ```
 kubectl kedify -v
-kubectl krew uninstall kedify && kubectl krew install --manifest-url=https://github.com/jkremser/kubectl-kedify/raw/main/.krew.yaml
+kubectl krew uninstall kedify && kubectl krew install --manifest-url=https://github.com/kedify/kubectl-kedify/raw/main/.krew.yaml
 kubectl kedify -v
 ```
 

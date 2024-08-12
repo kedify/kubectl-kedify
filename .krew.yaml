@@ -4,7 +4,7 @@ metadata:
   name: kedify
 spec:
   version: "v0.0.3"
-  homepage: https://github.com/jkremser/kubectl-kedify
+  homepage: https://github.com/kedify/kubectl-kedify
   shortDescription: "Simple TUI based shell script for installing and interfacing with Kedify."
   description: |
     It asks couple of questions and fill the answers to the proper places for K8s manifests.
@@ -16,10 +16,10 @@ spec:
             values:
               - darwin
               - linux
-      uri: https://github.com/jkremser/kubectl-kedify/archive/refs/tags/v0.0.3.zip
+      uri: https://github.com/kedify/kubectl-kedify/archive/refs/tags/v0.0.3.zip
       # 'sha256' is the sha256sum of the zip from url above (shasum -a 256 ..zip)
       sha256: 36c4cb32bf2287b043e80a25235f39b7e2675563d314d757b20f8dbc33a80734
-      # {{addURIAndSha "https://github.com/jkremser/kubectl-kedify/releases/download/{{ .TagName }}/kubectl-kedify{{ .TagName }}.tar.gz" .TagName }}
+      # {{addURIAndSha "https://github.com/kedify/kubectl-kedify/releases/download/{{ .TagName }}/kubectl-kedify{{ .TagName }}.tar.gz" .TagName }}
       files:
         - from: "kubectl-kedify-*/kubectl-kedify"
           to: "."

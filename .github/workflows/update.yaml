@@ -12,7 +12,7 @@ jobs:
   kubectl-pr:
     runs-on: ubuntu-20.04
     env:
-      REPO: jkremser/kubectl-kedify
+      REPO: kedify/kubectl-kedify
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@ebacdc22ef6c2cfb85ee5ded8f2e640f4c776dd5 # v2.0.0

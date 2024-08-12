@@ -3,7 +3,7 @@ kind: Plugin
 metadata:
   name: kedify
 spec:
-  version: "v0.0.3"
+  version: "v0.0.4"
   homepage: https://github.com/kedify/kubectl-kedify
   shortDescription: "Simple TUI based shell script for installing and interfacing with Kedify."
   description: |
@@ -16,9 +16,9 @@ spec:
             values:
               - darwin
               - linux
-      uri: https://github.com/kedify/kubectl-kedify/archive/refs/tags/v0.0.3.zip
+      uri: https://github.com/kedify/kubectl-kedify/archive/refs/tags/v0.0.4.zip
       # 'sha256' is the sha256sum of the zip from url above (shasum -a 256 ..zip)
-      sha256: 36c4cb32bf2287b043e80a25235f39b7e2675563d314d757b20f8dbc33a80734
+      sha256: d613a7217eb77cca04a27be839d78c8ee2f5fc88eac911f652acdf5d579b574d
       # {{addURIAndSha "https://github.com/kedify/kubectl-kedify/releases/download/{{ .TagName }}/kubectl-kedify{{ .TagName }}.tar.gz" .TagName }}
       files:
         - from: "kubectl-kedify-*/kubectl-kedify"

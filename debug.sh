@@ -11,28 +11,78 @@ function debug::__failure() {
 trap 'debug::__failure ${LINENO} "$BASH_COMMAND"' ERR
 
 function debug::__aggregate_interceptor_queue() {
-jq -n '
-  reduce inputs as $in ({}; 
-    reduce ($in | to_entries[]) as $entry (.;
-      .[$entry.key] as $existing |
-      if $existing then
-        .[$entry.key] = (
-          $existing | 
-          with_entries(
-            .value as $v | 
-            $entry.value[.key] as $new_val |
-            if $new_val then
-              .value = ($v + $new_val)
+    local output_type="$1"
+    local mode="$2"
+
+    local cmd=""
+    case $output_type in
+        json)
+            cmd="jq '.'"
+            ;;
+        yaml)
+            cmd="yq e -P"
+            ;;
+        *)
+            cmd="$(debug::__addon_queue_structured_output $mode) | column -t -s $'\t'"
+            ;;            
+    esac
+    jq -n --arg mode "$mode" '
+      if $mode == "aggregated" then
+        # Aggregate all queues (original behavior)
+        reduce inputs as $in ({};
+          reduce ($in.queue | to_entries[]) as $entry (.;
+            .[$entry.key] as $existing |
+            if $existing then
+              .[$entry.key] = (
+                $existing |
+                with_entries(
+                  .value as $v |
+                  $entry.value[.key] as $new_val |
+                  if $new_val then
+                    .value = ($v + $new_val)
+                  else
+                    .
+                  end
+                )
+              )
             else
-              .
+              .[$entry.key] = $entry.value
             end
           )
         )
       else
-        .[$entry.key] = $entry.value
+        # Individual mode: preserve pod names
+        [inputs | {pod: .name, queue: .queue}]
       end
-    )
-  )'
+    ' | eval "$cmd"
+}
+
+function debug::__addon_queue_structured_output() {
+    local mode="$1"
+    if [ "$mode" = "individual" ]; then
+        cat <<'EOF'
+jq -r '
+(["POD", "TARGET", "CONCURRENCY", "RPS"],
+ (.[] | [
+    .pod,
+    (.queue | keys[0]),
+    .queue[.queue | keys[0]].Concurrency,
+    .queue[.queue | keys[0]].RPS
+ ]))
+ | @tsv'
+EOF
+    else
+        cat <<'EOF'
+jq -r '
+(["TARGET", "CONCURRENCY", "RPS"],
+ (to_entries[] | [
+    .key,
+    .value.Concurrency,
+    .value.RPS
+ ]))
+ | @tsv'
+EOF
+    fi
 }
 
 function debug::__print_usage() {
@@ -72,25 +122,59 @@ EOF
 }
 
 function debug::__httpaddon_cmd() {
-   local sub_command="$1"
-   local ns=""
-   if kubectl get kedify -A > /dev/null 2>&1; then
-       ns=$(kubectl get kedify -A -o json | jq -r '.items[0].metadata.namespace')
-   fi
-   case $sub_command in
-       queue)
-           (kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" -o json | jq -r '.items[].metadata.name' | while read -r pod; do
-               local q=$(kubectl get --raw "/api/v1/namespaces/$ns/pods/$pod/proxy/queue")
-               >&2 echo "$pod: $q"
-               echo "$q"
-           done) | debug::__aggregate_interceptor_queue
-           ;;
-       *)
-           echo "Unknown sub-command: \"$sub_command\""
-           debug::__print_usage
-           exit 1
-           ;;
-   esac
+    local sub_command="$1"
+    shift
+
+    local ns=""
+    if kubectl get kedify -A > /dev/null 2>&1; then
+        ns=$(kubectl get kedify -A -o json | jq -r '.items[0].metadata.namespace')
+    fi
+    local output_type=""
+    local mode="aggregated"
+    local next="false"
+    for o in "$@"; do
+        if [[ "$next" == "true" ]]; then
+            output_type="$o"
+            next="false"
+            continue
+        fi
+        case $o in
+            -o|--output)
+                next="true"
+                ;;
+            -o=*|--output=*)
+                output_type="${o#*=}"
+                ;;
+            -o*)
+                output_type="${o#-o}"
+                ;;
+            --output*)
+                output_type="${o#--output}"
+                ;;
+            -i|--individual)
+                mode="individual"
+                ;;
+            *)
+                echo "Unknown flag: $o"
+                echo "" 
+                echo "Available flags:"
+                echo "  -o|--output         ... output format (json, yaml)"
+                echo "  -i|--individual     ... show individual queue sizes per interceptor instead of aggregating"
+                debug::__print_usage
+        esac
+    done
+    case $sub_command in
+        queue)
+            kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" -o json | jq -r '.items[].metadata.name' | while read -r pod; do
+                kubectl get --raw "/api/v1/namespaces/$ns/pods/$pod/proxy/queue" | jq -r '. | {name: "'$pod'", queue: .}'
+            done | debug::__aggregate_interceptor_queue "$output_type" "$mode"
+            ;;
+        *)
+            echo "Unknown sub-command: \"$sub_command\""
+            debug::__print_usage
+            exit 1
+            ;;
+    esac
 }
 
 function debug::__dump_cmd() {

@@ -10,6 +10,8 @@ TEMPLATE_FILE=${TEMPLATE_FILE:-"hso.yaml"}
 export COL="\e[2;35;49m"
 export RES="\e[0m"
 
+source ./${DIR}/debug.sh
+
 main() {
     [[ $# -lt 1 ]] && print_usage && exit 1
     for c in curl figlet fzf kubectl yq jq; do
@@ -28,6 +30,7 @@ main() {
         [[ $2 == ingress ]] || [[ $2 == ing ]] || [[ $2 == i ]] && { autoscale_ing ; exit 0; }
         autoscale ; exit 0
     }
+    [[ $1 == debug ]] || [[ $1 == dbg ]] && { shift 1 ; debug::cmd $@ ; exit 0; }
     [[ $1 == -v ]] || [[ $1 == --version ]] && { print_version ; exit 0; }
     print_usage
 }
@@ -154,7 +157,7 @@ delete() {
 print_usage() {
     cat << EOF
 
-Usage: kubectl kedify (i)nstall | (d)elete | (s)tatus | (a)utoscale
+Usage: kubectl kedify (i)nstall | (d)elete | (s)tatus | (a)utoscale | (dbg)debug
 
 Available commands:
    install,   i           Installs the Kedify agent
@@ -162,6 +165,7 @@ Available commands:
    logs,      l           Prints the logs of Kedify agent
    status,    s           Prints the status of Kedify agent
    autoscale, a           Runs the interactive mode for creating HTTPScaledObject
+   debug,     dbg         Provides low level information regarding Kedify components
 
    --version, -v          Prints the version
 

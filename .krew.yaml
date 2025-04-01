@@ -35,4 +35,6 @@ spec:
           to: "."
         - from: "kubectl-kedify-*/README.md"
           to: "."
+        - from: "kubectl-kedify-*/debug.sh"
+          to: "."
       bin: kubectl-kedify

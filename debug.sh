@@ -122,6 +122,13 @@ EOF
 }
 
 function debug::__httpaddon_cmd() {
+    if [[ $# -eq 0 ]]; then
+        echo "No sub-command provided, available sub-commands are:"
+        echo "  queue"
+        echo ""
+        debug::__print_usage
+        exit 1
+    fi
     local sub_command="$1"
     shift
 

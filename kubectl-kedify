@@ -10,7 +10,10 @@ TEMPLATE_FILE=${TEMPLATE_FILE:-"hso.yaml"}
 export COL="\e[2;35;49m"
 export RES="\e[0m"
 
-source ./${DIR}/debug.sh
+STORE_PATH=$(kubectl krew version | awk '/InstallPath/{print($2)}')/kedify/
+KEDIFY_VERSION=$(ls $STORE_PATH | head -n1)
+
+source "${STORE_PATH}/${KEDIFY_VERSION}/debug.sh"
 
 main() {
     [[ $# -lt 1 ]] && print_usage && exit 1

@@ -91,7 +91,7 @@ check_result() {
 }
 
 install() {
-    [[ $2 == --email ]] && [[ $# -gt 2 ]] && {
+    [[ $# -gt 2 ]] && [[ "${2}" == --email ]] && {
         export EMAIL="${3}"
     } || {
         # ask about email
@@ -101,11 +101,11 @@ install() {
         [[ -z $EMAIL ]] && echo "Email can't be empty" && exit 1
     }
     set +e
-    AGENT_ID=$(curl -s --request POST --data '{"email": "'"${EMAIL}"'"}' "${API}"/onboarding/create | jq -e -r '.agent_id')
+    AGENT_ID=$(curl -s --request POST --data '{"email": "'"${EMAIL}"'","name":"cli"}' "${API}"/onboarding/create | jq -e -r '.agent_id')
     retVal=$?
-    [ $retVal -ne 0 ] && echo "Can't create JWT token: $(curl -s --request POST --data '{"email": "'"${EMAIL}"'"}' "${API}"/onboarding/create|jq -C)" && exit 1
+    [ $retVal -ne 0 ] && echo "Can't create JWT token: $(curl -s --request POST --data '{"email": "'"${EMAIL}"'","name":"cli"}' "${API}"/onboarding/create|jq -C)" && exit 1
     set -e
-    TOKEN=$(curl -s --request POST --data '{"email": "'"${EMAIL}"'"}' "${API}"/onboarding/create | jq -r '.token')
+    TOKEN=$(curl -s --request POST --data '{"email": "'"${EMAIL}"'","name":"cli"}' "${API}"/onboarding/create | jq -r '.token')
     if [[ $- == *i* ]] || [[ "${@}" =~ \ -y( |$) ]]; then
         _resp="y"
     else # ask only if shell is interactive or -y was passed

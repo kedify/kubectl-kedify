@@ -4,11 +4,33 @@
 
 set -euo pipefail
 
+# Initialize global variables for problem tracking
+insights_all_problems=""
+insights_problem_resources_count=0
+insights_total_problems_count=0
+
 # Helper function to add problems
 insights_add_problem() {
-    local message="$1"
-    problem_count=$((problem_count + 1))
-    problems_found="${problems_found}${message}\n"
+    local resource_key="$1"
+    local message="$2"
+    
+    # Use a simple approach compatible with older bash versions
+    # Store problems in a format: "RESOURCE_NAME|||MESSAGE"
+    local problem_entry="${resource_key}|||${message}"
+    
+    # Check if this is the first problem for this resource
+    if ! echo "$insights_all_problems" | grep -q "^${resource_key}|||"; then
+        insights_problem_resources_count=$((insights_problem_resources_count + 1))
+    fi
+    
+    # Add the problem to our list
+    if [[ -z "$insights_all_problems" ]]; then
+        insights_all_problems="$problem_entry"
+    else
+        insights_all_problems="$insights_all_problems"$'\n'"$problem_entry"
+    fi
+    
+    insights_total_problems_count=$((insights_total_problems_count + 1))
 }
 
 # Check for polling interval issues when minReplicaCount > 0
@@ -46,10 +68,10 @@ insights_check_polling_interval_with_min_replicas() {
         
         if [[ "$idle_replicas" == "null" && "$polling_interval" -ne 30 ]] || [[ "$idle_replicas" != "null" && "$idle_replicas" != "0" && "$polling_interval" -ne 30 ]]; then
             # pollingInterval is set to non-default value but minReplicas > 0
-            insights_add_problem "  ${resource_name}: pollingInterval (${polling_interval}s) has no effect when minReplicaCount > 0. Consider removing pollingInterval setting."
+            insights_add_problem "$resource_name" "pollingInterval (${polling_interval}s) has no effect when minReplicaCount > 0. Consider removing pollingInterval setting."
         elif [[ "$polling_interval" -eq 30 && ("$idle_replicas" == "null" || ("$idle_replicas" != "null" && "$idle_replicas" != "0")) ]]; then
             # pollingInterval is default but minReplicas > 0 and not the special case
-            insights_add_problem "  ${resource_name}: pollingInterval has no effect when minReplicaCount > 0. Consider removing pollingInterval setting."
+            insights_add_problem "$resource_name" "pollingInterval has no effect when minReplicaCount > 0. Consider removing pollingInterval setting."
         fi
     fi
 }
@@ -72,7 +94,7 @@ insights_check_low_polling_interval() {
             resource_name="${so_name}"
         fi
         
-        insights_add_problem "  ${resource_name}: pollingInterval (${polling_interval}s) is set to a very low value. Be careful as this might overload your services."
+        insights_add_problem "$resource_name" "pollingInterval (${polling_interval}s) is set to a very low value. Be careful as this might overload your services."
     fi
 }
 
@@ -123,7 +145,7 @@ insights_check_missing_fallback() {
             resource_name="${so_name}"
         fi
         
-        insights_add_problem "  ${resource_name}: No fallback configuration specified. Consider adding a fallback section to handle scaler failures gracefully."
+        insights_add_problem "$resource_name" "No fallback configuration specified. Consider adding a fallback section to handle scaler failures gracefully."
     fi
 }
 
@@ -134,23 +156,36 @@ insights_analyze() {
     local kubectl_cmd="$3"
     
     figlet insights
-    echo -e "\nAnalyzing ScaledObjects for potential issues...\n"
+    
+    # Determine scope message
+    local scope_msg=""
+    if [[ "$all_namespaces" == true ]]; then
+        scope_msg="all namespaces"
+    else
+        scope_msg="namespace '$namespace'"
+    fi
+    
+    # Show initial message
+    printf "\nAnalyzing ScaledObjects in %s for potential issues" "$scope_msg"
     
     # Get ScaledObjects
     local scaledobjects_json=$(eval "$kubectl_cmd" 2>/dev/null)
     if [[ $? -ne 0 ]]; then
+        printf "\r\033[2K"
         echo "Error: Unable to retrieve ScaledObjects. Make sure KEDA is installed."
         exit 1
     fi
     
     local total_count=$(echo "$scaledobjects_json" | jq -r '.items | length')
     if [[ "$total_count" -eq 0 ]]; then
+        printf "\r\033[2K"
         echo "No ScaledObjects found."
         exit 0
     fi
     
-    problem_count=0
-    problems_found=""
+    # Simple progress indicator - show dots
+    local analyzed_count=0
+    printf " ."
     
     # Analyze each ScaledObject
     while IFS= read -r so_json; do
@@ -162,17 +197,50 @@ insights_analyze() {
         insights_check_low_polling_interval "$so_json" "$so_name" "$so_namespace" "$all_namespaces"
         insights_check_missing_fallback "$so_json" "$so_name" "$so_namespace" "$all_namespaces"
         
+        # Show progress
+        ((analyzed_count++))
+        if [[ $((analyzed_count % 3)) -eq 0 ]]; then
+            printf "."
+        fi
+        
     done < <(echo "$scaledobjects_json" | jq -c '.items[]')
     
-    # Print summary
-    echo -e "${COL}Summary:${RES}"
-    echo "Total ScaledObjects: $total_count"
-    echo "ScaledObjects with issues: $problem_count"
+    # Clear the analysis line and show results
+    printf "\r\033[2K"
     
-    if [[ "$problem_count" -gt 0 ]]; then
-        echo -e "\n${COL}Issues found:${RES}"
-        echo -e "$problems_found"
+    # Print summary using printf to avoid escape sequence issues
+    printf "\033[2;35;49mSummary:\033[0m Total ScaledObjects: %d | ScaledObjects with issues: %d | Total issues found: %d\n" "$total_count" "$insights_problem_resources_count" "$insights_total_problems_count"
+    
+    if [[ "$insights_problem_resources_count" -gt 0 ]]; then
+        printf "\n\033[2;35;49mIssues found:\033[0m\n"
+        
+        # Process problems and group by resource
+        local current_resource=""
+        while IFS= read -r line; do
+            # Skip empty lines
+            if [[ -z "$line" ]]; then
+                continue
+            fi
+            
+            # Parse the line manually to handle the ||| delimiter properly
+            local resource_name="${line%%|||*}"
+            local message="${line#*|||}"
+            
+            # Skip malformed entries
+            if [[ -z "$resource_name" || -z "$message" || "$resource_name" == "$line" ]]; then
+                continue
+            fi
+            
+            if [[ "$resource_name" != "$current_resource" ]]; then
+                if [[ -n "$current_resource" ]]; then
+                    echo  # Add blank line between resources
+                fi
+                printf "\n\033[1;33m%s:\033[0m\n" "$resource_name"
+                current_resource="$resource_name"
+            fi
+            printf "    - %s\n" "$message"
+        done < <(echo "$insights_all_problems" | grep -v '^$' | sort)
     else
-        echo -e "\n${COL}✓ No issues found!${RES}"
+        printf "\n\033[2;35;49m✓ No issues found!\033[0m\n"
     fi
 }

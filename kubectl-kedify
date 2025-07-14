@@ -146,39 +146,8 @@ logs() {
 }
 
 insights() {
-    local namespace=""
-    local all_namespaces=false
-    
-    # Parse arguments
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            -n|--namespace)
-                namespace="$2"
-                shift 2
-                ;;
-            -A|--all-namespaces)
-                all_namespaces=true
-                shift
-                ;;
-            *)
-                echo "Unknown option: $1"
-                echo "Usage: kubectl kedify insights [-n namespace] [-A|--all-namespaces]"
-                exit 1
-                ;;
-        esac
-    done
-    
-    # Build kubectl command
-    local kubectl_cmd="${KUBECTL} get scaledobjects"
-    if [[ "$all_namespaces" == true ]]; then
-        kubectl_cmd="$kubectl_cmd -A"
-    elif [[ -n "$namespace" ]]; then
-        kubectl_cmd="$kubectl_cmd -n $namespace"
-    fi
-    kubectl_cmd="$kubectl_cmd -o json"
-    
     # Delegate to insights module
-    insights_analyze "$namespace" "$all_namespaces" "$kubectl_cmd"
+    insights_cmd "$@"
 }
 
 delete() {

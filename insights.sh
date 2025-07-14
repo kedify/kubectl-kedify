@@ -44,15 +44,18 @@ insights_check_polling_interval_with_min_replicas() {
     local idle_replicas=$(echo "$so_json" | jq -r '.spec.idleReplicaCount // "null"')
     local polling_interval=$(echo "$so_json" | jq -r '.spec.pollingInterval // 30')
     
-    # Check for polling interval issue
-    if [[ "$min_replicas" -gt 0 ]]; then
+    # Check for polling interval issue - ensure min_replicas is numeric and > 0
+    if [[ "$min_replicas" =~ ^[0-9]+$ && "$min_replicas" -gt 0 ]]; then
         # Special case: if idleReplicaCount is 0 and minReplicaCount > 0, this is correct
         if [[ "$idle_replicas" == "0" ]]; then
             return
         fi
         
         # Check if any trigger has useCachedMetrics set to true
-        local has_cached_metrics=$(echo "$so_json" | jq -r '.spec.triggers[]?.useCachedMetrics // false' | grep -q "true" && echo "true" || echo "false")
+        local has_cached_metrics="false"
+        if echo "$so_json" | jq -r '.spec.triggers[]?.useCachedMetrics // false' | grep -q "true"; then
+            has_cached_metrics="true"
+        fi
         
         # If any trigger uses cached metrics, pollingInterval is valid
         if [[ "$has_cached_metrics" == "true" ]]; then
@@ -66,10 +69,10 @@ insights_check_polling_interval_with_min_replicas() {
             resource_name="${so_name}"
         fi
         
-        if [[ "$idle_replicas" == "null" && "$polling_interval" -ne 30 ]] || [[ "$idle_replicas" != "null" && "$idle_replicas" != "0" && "$polling_interval" -ne 30 ]]; then
+        if [[ "$idle_replicas" == "null" && "$polling_interval" != "30" ]] || [[ "$idle_replicas" != "null" && "$idle_replicas" != "0" && "$polling_interval" != "30" ]]; then
             # pollingInterval is set to non-default value but minReplicas > 0
             insights_add_problem "$resource_name" "pollingInterval (${polling_interval}s) has no effect when minReplicaCount > 0. Consider removing pollingInterval setting."
-        elif [[ "$polling_interval" -eq 30 && ("$idle_replicas" == "null" || ("$idle_replicas" != "null" && "$idle_replicas" != "0")) ]]; then
+        elif [[ "$polling_interval" == "30" && "$idle_replicas" != "0" ]]; then
             # pollingInterval is default but minReplicas > 0 and not the special case
             insights_add_problem "$resource_name" "pollingInterval has no effect when minReplicaCount > 0. Consider removing pollingInterval setting."
         fi
@@ -85,8 +88,8 @@ insights_check_low_polling_interval() {
     
     local polling_interval=$(echo "$so_json" | jq -r '.spec.pollingInterval // "null"')
     
-    # Only check if pollingInterval is explicitly set
-    if [[ "$polling_interval" != "null" && "$polling_interval" -le 10 ]]; then
+    # Only check if pollingInterval is explicitly set and is numeric
+    if [[ "$polling_interval" != "null" && "$polling_interval" =~ ^[0-9]+$ && "$polling_interval" -le 10 ]]; then
         local resource_name=""
         if [[ "$all_namespaces" == true ]]; then
             resource_name="${so_namespace}/${so_name}"
@@ -113,7 +116,6 @@ insights_check_missing_fallback() {
     fi
     
     # Check if ScaledObject has only CPU/memory triggers or Value-type triggers
-    local triggers=$(echo "$so_json" | jq -r '.spec.triggers[]')
     local has_supported_triggers=false
     
     while IFS= read -r trigger; do
@@ -149,7 +151,88 @@ insights_check_missing_fallback() {
     fi
 }
 
-# Main insights function
+# Help function for insights command
+insights_print_help() {
+    cat << EOF
+
+Usage: kubectl kedify insights [-n namespace] [-A|--all-namespaces]
+
+Analyzes ScaledObjects for potential configuration issues and provides actionable insights.
+
+Options:
+  -n, --namespace NAMESPACE    Analyze ScaledObjects in the specified namespace
+  -A, --all-namespaces         Analyze ScaledObjects across all namespaces
+  -h, --help                   Show this help message
+
+Examples:
+  kubectl kedify insights                        ... analyzes ScaledObjects in current namespace
+  kubectl kedify insights -A                     ... analyzes ScaledObjects in all namespaces
+  kubectl kedify insights -n myapp               ... analyzes ScaledObjects in specific namespace
+
+The insights command checks for:
+  • pollingInterval effectiveness when minReplicaCount > 0
+  • Low pollingInterval values that might overload services
+  • Missing fallback configuration for supported scalers
+
+EOF
+}
+
+# Main insights command handler
+insights_cmd() {
+    local namespace=""
+    local all_namespaces=false
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -n|--namespace)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: -n|--namespace requires a value"
+                    echo ""
+                    insights_print_help
+                    exit 1
+                fi
+                namespace="$2"
+                shift 2
+                ;;
+            -A|--all-namespaces)
+                all_namespaces=true
+                shift
+                ;;
+            -h|--help)
+                insights_print_help
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1"
+                echo ""
+                insights_print_help
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Build kubectl command
+    local kubectl_cmd="${KUBECTL} get scaledobjects"
+    if [[ "$all_namespaces" == true ]]; then
+        kubectl_cmd="$kubectl_cmd -A"
+    elif [[ -n "$namespace" ]]; then
+        kubectl_cmd="$kubectl_cmd -n $namespace"
+    else
+        # If no namespace specified, get the current namespace from context
+        namespace=$(kubectl config view --minify --output 'jsonpath={..namespace}' 2>/dev/null || echo "default")
+        # If the namespace is empty, default to "default"
+        if [[ -z "$namespace" ]]; then
+            namespace="default"
+        fi
+    fi
+    kubectl_cmd="$kubectl_cmd -o json"
+    
+    # Call the analyze function
+    insights_analyze "$namespace" "$all_namespaces" "$kubectl_cmd"
+}
+
+# Main analysis function
 insights_analyze() {
     local namespace="$1"
     local all_namespaces="$2"
@@ -169,7 +252,8 @@ insights_analyze() {
     printf "\nAnalyzing ScaledObjects in %s for potential issues" "$scope_msg"
     
     # Get ScaledObjects
-    local scaledobjects_json=$(eval "$kubectl_cmd" 2>/dev/null)
+    local scaledobjects_json
+    scaledobjects_json=$(eval "$kubectl_cmd" 2>/dev/null)
     if [[ $? -ne 0 ]]; then
         printf "\r\033[2K"
         echo "Error: Unable to retrieve ScaledObjects. Make sure KEDA is installed."
@@ -177,9 +261,9 @@ insights_analyze() {
     fi
     
     local total_count=$(echo "$scaledobjects_json" | jq -r '.items | length')
-    if [[ "$total_count" -eq 0 ]]; then
+    if [[ "$total_count" == "0" ]]; then
         printf "\r\033[2K"
-        echo "No ScaledObjects found."
+        echo "No ScaledObjects found in $scope_msg."
         exit 0
     fi
     
@@ -212,7 +296,7 @@ insights_analyze() {
     printf "\033[2;35;49mSummary:\033[0m Total ScaledObjects: %d | ScaledObjects with issues: %d | Total issues found: %d\n" "$total_count" "$insights_problem_resources_count" "$insights_total_problems_count"
     
     if [[ "$insights_problem_resources_count" -gt 0 ]]; then
-        printf "\n\033[2;35;49mIssues found:\033[0m\n"
+        printf "\n\033[2;35;49mISSUES FOUND:\033[0m\n"
         
         # Process problems and group by resource
         local current_resource=""

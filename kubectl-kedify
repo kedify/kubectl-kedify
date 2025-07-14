@@ -13,7 +13,8 @@ export RES="\e[0m"
 STORE_PATH=$(kubectl krew version | awk '/InstallPath/{print($2)}')/kedify/
 KEDIFY_VERSION=$(ls $STORE_PATH | head -n1)
 
-source "${STORE_PATH}/${KEDIFY_VERSION}/debug.sh"
+source "${STORE_PATH}${KEDIFY_VERSION}/debug.sh"
+source "${STORE_PATH}${KEDIFY_VERSION}/insights.sh"
 
 main() {
     [[ $# -lt 1 ]] && print_usage && exit 1
@@ -34,6 +35,7 @@ main() {
         autoscale ; exit 0
     }
     [[ $1 == debug ]] || [[ $1 == dbg ]] && { shift 1 ; debug::cmd $@ ; exit 0; }
+    [[ $1 == insights ]] || [[ $1 == ins ]] && { shift 1 ; insights $@ ; exit 0; }
     [[ $1 == -v ]] || [[ $1 == --version ]] && { print_version ; exit 0; }
     print_usage
 }
@@ -143,6 +145,11 @@ logs() {
     ${KUBECTL} logs -lcontrol-plane=kedify-agent -nkeda --tail=-1 $@
 }
 
+insights() {
+    # Delegate to insights module
+    insights_cmd "$@"
+}
+
 delete() {
     if [[ $- == *i* ]] || [[ "${@}" =~ \ -y( |$) ]]; then
         _resp="y"
@@ -160,7 +167,7 @@ delete() {
 print_usage() {
     cat << EOF
 
-Usage: kubectl kedify (i)nstall | (d)elete | (s)tatus | (a)utoscale | (dbg)debug
+Usage: kubectl kedify (i)nstall | (d)elete | (s)tatus | (a)utoscale | (dbg)debug | (ins)ights
 
 Available commands:
    install,   i           Installs the Kedify agent
@@ -169,6 +176,7 @@ Available commands:
    status,    s           Prints the status of Kedify agent
    autoscale, a           Runs the interactive mode for creating HTTPScaledObject
    debug,     dbg         Provides low level information regarding Kedify components
+   insights,  ins         Analyzes ScaledObjects for potential configuration issues
 
    --version, -v          Prints the version
 
@@ -180,6 +188,9 @@ Examples:
    kubectl kedify autoscale ingress               ... will ask questions about what ingress to autoscale
    kubectl kedify l -f                            ... prints the logs of Kedify agent and follows them
    kubectl kedify a ing                           ... same as ^
+   kubectl kedify insights                        ... analyzes ScaledObjects in current namespace
+   kubectl kedify ins -A                          ... analyzes ScaledObjects in all namespaces
+   kubectl kedify insights -n myapp               ... analyzes ScaledObjects in specific namespace
 
 Other env vars that can be passed:
    API                                         ... defaults to https://api.kedify.io

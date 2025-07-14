@@ -25,6 +25,8 @@ spec:
           to: "."
         - from: "kubectl-kedify-*/preview-functions.sh"
           to: "."
+        - from: "kubectl-kedify-*/insights.sh"
+          to: "."
         - from: "kubectl-kedify-*/LICENSE"
           to: "."
         - from: "kubectl-kedify-*/hso.yaml"

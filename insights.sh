@@ -282,7 +282,7 @@ insights_analyze() {
         insights_check_missing_fallback "$so_json" "$so_name" "$so_namespace" "$all_namespaces"
         
         # Show progress
-        ((analyzed_count++))
+        analyzed_count=$((analyzed_count+1))
         if [[ $((analyzed_count % 3)) -eq 0 ]]; then
             printf "."
         fi

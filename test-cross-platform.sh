@@ -40,7 +40,7 @@ print_info() {
 # Helper function to get all scripts
 get_all_scripts() {
     # Find all .sh files and the main kubectl-kedify script
-    find . -maxdepth 1 -name "*.sh" -o -name "kubectl-kedify" | grep -v "./test-cross-platform.sh" | sort
+    find . -maxdepth 1 \( -name "*.sh" -o -name "kubectl-kedify" \) | grep -v "./test-cross-platform.sh" | sort
 }
 
 # Test functions
@@ -213,11 +213,16 @@ test_platform_detection() {
     # Test the platform-specific version detection logic
     if [ "$(uname)" == "Darwin" ]; then
         print_info "Testing macOS-specific readlink behavior"
-        # Test without -f flag (macOS doesn't support it by default)
-        if readlink kubectl-kedify 2>/dev/null || true; then
-            print_pass "macOS readlink works"
+        # On macOS, readlink only works with symlinks, not regular files
+        if [ -L "kubectl-kedify" ]; then
+            if readlink kubectl-kedify 2>/dev/null; then
+                print_pass "macOS readlink works on symlink"
+            else
+                print_fail "macOS readlink failed on symlink"
+            fi
         else
-            print_pass "macOS readlink test completed"
+            print_info "kubectl-kedify is not a symlink (expected on macOS for regular file)"
+            print_pass "macOS readlink test skipped (file is not a symlink)"
         fi
     else
         print_info "Testing Linux-specific readlink behavior"
@@ -247,11 +252,19 @@ test_version_detection() {
     if [ "$(uname)" == "Darwin" ]; then
         print_info "macOS detected"
         # Test macOS version detection
-        VERSION_PATH=$(dirname "$(readlink kubectl-kedify 2>/dev/null)" 2>/dev/null)/VERSION 2>/dev/null || echo "$(pwd)/VERSION"
+        if VERSION_PATH=$(dirname "$(readlink kubectl-kedify 2>/dev/null)" 2>/dev/null)/VERSION 2>/dev/null; then
+            : # VERSION_PATH is set
+        else
+            VERSION_PATH="$(pwd)/kubectl-kedify"
+        fi
     else
         print_info "Linux detected"
         # Test Linux version detection
-        VERSION_PATH=$(dirname "$(readlink -f kubectl-kedify)")/VERSION 2>/dev/null || echo "$(pwd)/VERSION"
+        if VERSION_PATH=$(dirname "$(readlink -f kubectl-kedify)")/VERSION 2>/dev/null; then
+            : # VERSION_PATH is set
+        else
+            VERSION_PATH="$(pwd)/kubectl-kedify"
+        fi
     fi
     print_info "Version path would be: $VERSION_PATH"
     

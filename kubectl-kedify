@@ -10,11 +10,33 @@ TEMPLATE_FILE=${TEMPLATE_FILE:-"hso.yaml"}
 export COL="\e[2;35;49m"
 export RES="\e[0m"
 
-STORE_PATH=$(kubectl krew version | awk '/InstallPath/{print($2)}')/kedify/
-KEDIFY_VERSION=$(ls $STORE_PATH | head -n1)
+# Detect if running as kubectl plugin or locally
+# Check if the script is in the krew store path or being run locally
+if [[ "$0" == *"/.krew/store/"* ]] || [[ "$0" == *"/.krew/bin/"* ]]; then
+    # Running as kubectl plugin - use krew store
+    STORE_PATH="$(kubectl krew version | awk '/InstallPath/{print($2)}')/kedify/"
+    KEDIFY_VERSION=$(ls "$STORE_PATH" | head -n1)
+    DEBUG_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/debug.sh"
+    INSIGHTS_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/insights.sh"
+else
+    # Running locally - use local files
+    DEBUG_SCRIPT="${DIR}/debug.sh"
+    INSIGHTS_SCRIPT="${DIR}/insights.sh"
+fi
 
-source "${STORE_PATH}${KEDIFY_VERSION}/debug.sh"
-source "${STORE_PATH}${KEDIFY_VERSION}/insights.sh"
+# Source debug script if it exists
+if [[ -f "${DEBUG_SCRIPT}" ]]; then
+    source "${DEBUG_SCRIPT}"
+else
+    echo "Warning: Debug script not found at ${DEBUG_SCRIPT}" >&2
+fi
+
+# Source insights script if it exists
+if [[ -f "${INSIGHTS_SCRIPT}" ]]; then
+    source "${INSIGHTS_SCRIPT}"
+else
+    echo "Warning: Insights script not found at ${INSIGHTS_SCRIPT}" >&2
+fi
 
 main() {
     [[ $# -lt 1 ]] && print_usage && exit 1

@@ -251,14 +251,20 @@ insights_analyze() {
     # Show initial message
     printf "\nAnalyzing ScaledObjects in %s for potential issues" "$scope_msg"
     
-    # Get ScaledObjects
-    local scaledobjects_json
-    scaledobjects_json=$(eval "$kubectl_cmd" 2>/dev/null)
-    if [[ $? -ne 0 ]]; then
+    # Check if ScaledObjects CRD exists first
+    if ! kubectl api-resources --api-group=keda.sh | grep -q scaledobjects; then
         printf "\r\033[2K"
-        echo "Error: Unable to retrieve ScaledObjects. Make sure KEDA is installed."
+        echo "Error: ScaledObjects CRD not found. Make sure Kedify/KEDA is installed." >&2
         exit 1
     fi
+    
+    # Get ScaledObjects
+    local scaledobjects_json
+    scaledobjects_json=$(eval "$kubectl_cmd" 2>/dev/null) || {
+        printf "\r\033[2K"
+        echo "Error: Unable to retrieve ScaledObjects. Make sure KEDA is installed and you have proper permissions." >&2
+        exit 1
+    }
     
     local total_count=$(echo "$scaledobjects_json" | jq -r '.items | length')
     if [[ "$total_count" == "0" ]]; then

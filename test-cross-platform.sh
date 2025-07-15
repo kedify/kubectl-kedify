@@ -99,7 +99,7 @@ test_function_loading() {
     local sh_scripts=()
     while IFS= read -r script; do
         [[ -n "$script" ]] && sh_scripts+=("$script")
-    done < <(find . -maxdepth 1 -name "*.sh" | grep -v "./test-cross-platform.sh" | sort)
+    done < <(get_all_scripts | grep '\.sh$')
     
     if [[ ${#sh_scripts[@]} -eq 0 ]]; then
         print_info "No .sh scripts found to test function loading"

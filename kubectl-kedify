@@ -14,8 +14,8 @@ export RES="\e[0m"
 # Check if the script is in the krew store path or being run locally
 if [[ "$0" == *"/.krew/store/"* ]] || [[ "$0" == *"/.krew/bin/"* ]]; then
     # Running as kubectl plugin - use krew store
-    STORE_PATH=$(kubectl krew version | awk '/InstallPath/{print($2)}')/kedify/
-    KEDIFY_VERSION=$(ls $STORE_PATH | head -n1)
+    STORE_PATH="$(kubectl krew version | awk '/InstallPath/{print($2)}')/kedify/"
+    KEDIFY_VERSION=$(ls "$STORE_PATH" | head -n1)
     DEBUG_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/debug.sh"
     INSIGHTS_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/insights.sh"
 else

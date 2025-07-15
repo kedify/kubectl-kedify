@@ -1,0 +1,54 @@
+name: kubectl-kedify Cross-Platform Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-platforms:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            shell: bash
+            deps_cmd: |
+              sudo apt-get update
+              sudo apt-get install -y curl jq shellcheck figlet fzf bat
+              # Install kubectl
+              curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+              sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          - os: macos-latest
+            shell: bash
+            deps_cmd: |
+              brew install jq shellcheck figlet fzf bat kubectl
+          - os: windows-latest
+            shell: bash
+            deps_cmd: |
+              choco install jq kubernetes-cli -y
+
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: ${{ matrix.deps_cmd }}
+        continue-on-error: ${{ matrix.os == 'windows-latest' }}
+
+      - name: Make scripts executable
+        run: |
+          # Make all scripts executable dynamically
+          find . -maxdepth 1 \( -name "*.sh" -o -name "kubectl-kedify" \) -exec chmod +x {} \;
+        if: matrix.os != 'windows-latest'
+
+      - name: Run tests
+        run: ./test-cross-platform.sh

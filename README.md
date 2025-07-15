@@ -61,3 +61,29 @@ apt-get install bat curl figlet fzf jq
 ```
 
 and for `yq` consult the [readme](https://github.com/mikefarah/yq#install).
+
+## Development and Testing
+
+### Local Testing
+
+This project includes a cross-platform test script that automatically detects and validates all bash scripts.
+
+```bash
+# Run default tests (full on Mac/Linux, smoke on others)
+./test-cross-platform.sh
+
+# Run smoke tests only (basic syntax, function loading - works on all platforms)
+./test-cross-platform.sh smoke
+
+# Run full tests (includes shellcheck, platform-specific features - Mac/Linux only)
+./test-cross-platform.sh full
+```
+
+### Running as kubectl plugin vs locally
+
+The script automatically detects whether it's running as a kubectl plugin (via krew) or locally in development:
+
+- **As kubectl plugin**: Uses scripts from the krew store (`~/.krew/store/kedify/`)
+- **Locally**: Uses scripts from the project directory
+
+This allows for seamless development and testing of unreleased features.

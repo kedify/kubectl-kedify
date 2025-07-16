@@ -6,6 +6,62 @@ Simple TUI based shell script for installing and interfacing with Kedify.
 [![Watch the full asciicast](./demo.gif)](https://asciinema.org/a/668253)
 ([pauseable demo](https://asciinema.org/a/668253))
 
+## Commands
+
+### Core Commands
+
+- **install, i** - Installs the Kedify agent
+- **delete, d** - Uninstalls the Kedify agent
+- **status, s** - Prints the status of Kedify agent
+- **logs, l** - Prints the logs of Kedify agent
+- **autoscale, a** - Runs the interactive mode for creating HTTPScaledObject
+
+### Debug & Analysis Commands
+
+- **debug, dbg** - Provides low-level information regarding Kedify components
+  - `so/scaledobject` - Inspect ScaledObject resource
+  - `httpaddon` - Verify HTTP Addon setup and current configuration
+
+- **insights, ins** - Analyzes ScaledObjects for potential configuration issues
+  - Checks for polling interval effectiveness when minReplicaCount > 0
+  - Identifies low polling interval values that might overload services  
+  - Detects missing fallback configuration for supported scalers
+
+- **dump, dmp** - Collects comprehensive debug information from Kedify/KEDA components
+  - Gathers cluster-wide information (nodes, autoscaler data, etc.)
+  - Collects namespace-specific data (events, scaling resources, pod logs)
+  - Supports output to directory or compressed archive format
+
+### Command Examples
+
+```bash
+# Installation
+kubectl kedify install                         # Interactive mode
+kubectl kedify i --email john.doe@email.com -y # Non-interactive mode
+
+# Status and Logs  
+kubectl kedify status                          # Show agent status
+kubectl kedify l -f                            # Follow logs
+
+# Autoscaling
+kubectl kedify autoscale                       # Interactive autoscaling setup
+kubectl kedify autoscale ingress               # Autoscale specific ingress
+
+# Debug Commands
+kubectl kedify debug scaledobject -n default foo     # Inspect specific ScaledObject
+kubectl kedify debug httpaddon queue                 # Check HTTP addon queue sizes
+
+# Analysis
+kubectl kedify insights                        # Analyze current namespace
+kubectl kedify ins -A                          # Analyze all namespaces
+kubectl kedify insights -n myapp               # Analyze specific namespace
+
+# Data Collection
+kubectl kedify dump                            # Collect debug info from current namespace
+kubectl kedify dmp -A --archive                # Collect from all namespaces as tar.gz
+kubectl kedify dump -o /tmp/debug -n myapp     # Collect from specific namespace to directory
+```
+
 ## Quick start
 
 Having krew [installed](https://krew.sigs.k8s.io/docs/user-guide/setup/install/), just run:

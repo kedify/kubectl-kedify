@@ -93,12 +93,10 @@ Usage: kubectl kedify debug <command>
 Available commands:
   so/scaledobject       Inspect ScaledObject resource
   httpaddon             Verify HTTP Addon setup and current configuration
-  dump                  Get detailed information about the Kedify scaling
 
 Examples:
   kubectl kedify debug scaledobject -n default foo     ... inspect ScaledObject resource named 'foo' in the 'default' namespace
   kubectl kedify debug httpaddon queue                 ... check the queue sizes in each HTTP addon interceptor pod
-  kubectl kedify debug dump -o debug.zip               ... check details from Kedify components, logs, and metrics and store those into an archive 'debug.zip'
 
 EOF
 }
@@ -182,10 +180,6 @@ function debug::__httpaddon_cmd() {
             exit 1
             ;;
     esac
-}
-
-function debug::__dump_cmd() {
-    echo "TODO: implement dump command"
 }
 
 function debug::__no_value() {
@@ -364,9 +358,6 @@ function debug::cmd() {
     fi
 
     case $1 in
-        dump)
-            debug::__dump_cmd "${@:2}"
-            ;;
         so|scaledobject)
             debug::__scaledobject_cmd "${@:2}"
             ;;

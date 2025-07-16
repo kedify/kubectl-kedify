@@ -3,6 +3,9 @@
 set -euo pipefail
 set -Eo functrace
 
+# Global variable for quiet mode
+QUIET_MODE="false"
+
 function dump::__failure() {
     local lineno=$1
     local msg=$2
@@ -10,7 +13,11 @@ function dump::__failure() {
 }
 trap 'dump::__failure ${LINENO} "$BASH_COMMAND"' ERR
 
-
+function dump::__print_status() {
+    if [[ "$QUIET_MODE" != "true" ]]; then
+        echo -e "$@"
+    fi
+}
 
 
 
@@ -28,12 +35,14 @@ Options:
   -o, --output DIR         Output directory or archive file path (default: current directory)
   -n, --namespace NS       Specific namespace (default: current namespace)  
   -A, --all-namespaces     Collect from all namespaces
+  -q, --quiet              Quiet mode - suppress all status output
   --archive                Create tar.gz archive
 
 Examples:
   kubectl kedify dump                            ... collect diagnostic info from current namespace
   kubectl kedify dump -n myapp                   ... collect diagnostic info from 'myapp' namespace
   kubectl kedify dump -A                         ... collect diagnostic info from all namespaces
+  kubectl kedify dump -q                         ... collect diagnostic info quietly (no status messages)
   kubectl kedify dump -o /tmp/data               ... collect diagnostic info to '/tmp/data' directory
   kubectl kedify dump -o data.tar.gz --archive  ... collect diagnostic info and store in 'data.tar.gz' archive
 
@@ -58,8 +67,6 @@ jq -s '
 EOF
 }
 
-
-
 function dump::__cleanup_port_forwards() {
     local pids=("$@")
     if [[ ${#pids[@]} -gt 0 ]]; then
@@ -75,7 +82,7 @@ function dump::__wait_for_port_forwards() {
     local ports=("$@")
     local max_wait=30
     
-    echo -e "  \033[36m- Waiting for port-forwards to be ready...\033[0m"
+    dump::__print_status "  \033[36m- Waiting for port-forwards to be ready...\033[0m"
     
     for port in "${ports[@]}"; do
         local ready=false
@@ -92,7 +99,7 @@ function dump::__wait_for_port_forwards() {
         done
         
         if [[ "$ready" == "false" ]]; then
-            echo -e "    \033[31m⚠ Warning: Port $port not ready after ${max_wait}s, proceeding anyway\033[0m"
+            dump::__print_status "    \033[31m⚠ Warning: Port $port not ready after ${max_wait}s, proceeding anyway\033[0m"
         fi
     done
 }
@@ -346,7 +353,7 @@ function dump::__collect_http_addon_queue_data() {
     
     # Output to file or stdout based on whether output_file was provided
     if [[ "$output_to_file" == "true" ]]; then
-        echo "$function_output" > "${ns_dir}/${output_file}" 2>/dev/null || echo -e "    \033[31m${error_msg}\033[0m"
+        echo "$function_output" > "${ns_dir}/${output_file}" 2>/dev/null || dump::__print_status "    \033[31m${error_msg}\033[0m"
     else
         echo "$function_output"
     fi
@@ -369,14 +376,14 @@ function dump::__collect_namespace_data() {
     # Set up trap to cleanup port-forwards if the script is interrupted
     trap 'if [[ ${#pids[@]} -gt 0 ]]; then dump::__cleanup_port_forwards "${pids[@]}"; fi' INT TERM EXIT
     
-    echo -e "\033[33m=== Processing Namespace: $ns ===\033[0m"
+    dump::__print_status "\033[33m=== Processing Namespace: $ns ===\033[0m"
     
     # Collect Kubernetes events for this namespace
-    echo -e "\033[36mCollecting Kubernetes events...\033[0m"
+    dump::__print_status "\033[36mCollecting Kubernetes events...\033[0m"
     if kubectl get events -n "$ns" --sort-by='.lastTimestamp' -o yaml > "${ns_dir}/events.yaml" 2>/dev/null; then
-        echo -e "  \033[32m✓ Events collected\033[0m"
+        dump::__print_status "  \033[32m✓ Events collected\033[0m"
     else
-        echo -e "  \033[31m✗ Failed to collect events\033[0m"
+        dump::__print_status "  \033[31m✗ Failed to collect events\033[0m"
     fi
     
     # Get kedify-proxy pods and collect their data
@@ -384,8 +391,8 @@ function dump::__collect_namespace_data() {
     IFS=$'\n' read -d '' -r -a pods < <(kubectl get pods -n "$ns" -l app=kedify-proxy -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' && printf '\0')
     
     if [[ ${#pods[@]} -gt 0 ]]; then
-        echo -e "\033[36mCollecting kedify-proxy data...\033[0m"
-        echo -e "  \033[90mFound ${#pods[@]} kedify-proxy pod(s)\033[0m"
+        dump::__print_status "\033[36mCollecting kedify-proxy data...\033[0m"
+        dump::__print_status "  \033[90mFound ${#pods[@]} kedify-proxy pod(s)\033[0m"
         
         # Set up port forwards (disable job control to suppress messages)
         set +m
@@ -404,20 +411,20 @@ function dump::__collect_namespace_data() {
         # Collect data from each kedify-proxy pod
         local_port=9901
         for pod in "${pods[@]}"; do
-            echo -e "  \033[36m- Collecting envoy data from:\033[0m $pod"
+            dump::__print_status "  \033[36m- Collecting envoy data from:\033[0m $pod"
             local_port=$((local_port + 1))
             
             # Pod manifest and description
-            kubectl get pod -n "$ns" "$pod" -o yaml > "${ns_dir}/${pod}-pod.yaml" 2>/dev/null || echo -e "    \033[31mFailed to get pod YAML for $pod\033[0m"
-            kubectl describe pod -n "$ns" "$pod" > "${ns_dir}/${pod}-pod.describe.txt" 2>/dev/null || echo -e "    \033[31mFailed to describe pod $pod\033[0m"
+            kubectl get pod -n "$ns" "$pod" -o yaml > "${ns_dir}/${pod}-pod.yaml" 2>/dev/null || dump::__print_status "    \033[31mFailed to get pod YAML for $pod\033[0m"
+            kubectl describe pod -n "$ns" "$pod" > "${ns_dir}/${pod}-pod.describe.txt" 2>/dev/null || dump::__print_status "    \033[31mFailed to describe pod $pod\033[0m"
             
             # Pod logs
-            kubectl logs -n "$ns" "$pod" > "${ns_dir}/${pod}-logs.txt" 2>/dev/null || echo -e "    \033[31mFailed to get logs for $pod\033[0m"
+            kubectl logs -n "$ns" "$pod" > "${ns_dir}/${pod}-logs.txt" 2>/dev/null || dump::__print_status "    \033[31mFailed to get logs for $pod\033[0m"
             
             # Envoy config dump
             for i in {1..5}; do
                 if curl -s --max-time 5 "http://localhost:${local_port}/config_dump" -o "${ns_dir}/${pod}-config_dump.json" 2>/dev/null; then
-                    echo -e "    \033[32m✓ Config dump collected\033[0m"
+                    dump::__print_status "    \033[32m✓ Config dump collected\033[0m"
                     break
                 fi
                 sleep 1
@@ -426,7 +433,7 @@ function dump::__collect_namespace_data() {
             # Envoy metrics
             for i in {1..5}; do
                 if curl -s --max-time 5 "http://localhost:${local_port}/stats/prometheus" -o "${ns_dir}/${pod}-prometheus.txt" 2>/dev/null; then
-                    echo -e "    \033[32m✓ Prometheus metrics collected\033[0m"
+                    dump::__print_status "    \033[32m✓ Prometheus metrics collected\033[0m"
                     break
                 fi
                 sleep 1
@@ -434,11 +441,11 @@ function dump::__collect_namespace_data() {
         done
         
         # Collect resource usage for all kedify-proxy pods in this namespace
-        echo -e "  \033[36m- Collecting resource usage for kedify-proxy pods...\033[0m"
+        dump::__print_status "  \033[36m- Collecting resource usage for kedify-proxy pods...\033[0m"
         if kubectl top pod -n "$ns" -l app=kedify-proxy --no-headers 2>/dev/null > "${ns_dir}/kedify-proxy-pods-resource-usage.txt"; then
-            echo -e "    \033[32m✓ Resource usage collected\033[0m"
+            dump::__print_status "    \033[32m✓ Resource usage collected\033[0m"
         else
-            echo -e "    \033[31m✗ Failed to get resource usage (metrics-server may not be available)\033[0m"
+            dump::__print_status "    \033[31m✗ Failed to get resource usage (metrics-server may not be available)\033[0m"
         fi
         
         # Cleanup port forwards (suppress job control messages)
@@ -448,28 +455,28 @@ function dump::__collect_namespace_data() {
     fi
     
     # Collect ScaledObjects, HPAs, ScaledJobs, HTTPScaledObjects, and Kedify resources from this namespace
-    echo -e "\033[36mCollecting scaling resources...\033[0m"
+    dump::__print_status "\033[36mCollecting scaling resources...\033[0m"
     
     # ScaledObjects (only if CRD exists)
     if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
         local so_check=$(kubectl get scaledobjects -n "$ns" --no-headers 2>/dev/null)
         if [[ -n "$so_check" ]]; then
             kubectl get scaledobjects -n "$ns" -o yaml > "${ns_dir}/scaledobjects.yaml" 2>/dev/null
-            echo -e "  \033[32m✓ ScaledObjects collected\033[0m"
+            dump::__print_status "  \033[32m✓ ScaledObjects collected\033[0m"
         else
-            echo -e "  \033[90m- No ScaledObjects found\033[0m"
+            dump::__print_status "  \033[90m- No ScaledObjects found\033[0m"
         fi
     else
-        echo -e "  \033[90m- ScaledObjects CRD not available (KEDA not installed)\033[0m"
+        dump::__print_status "  \033[90m- ScaledObjects CRD not available (KEDA not installed)\033[0m"
     fi
     
     # HPAs
     local hpa_check=$(kubectl get hpa -n "$ns" --no-headers 2>/dev/null)
     if [[ -n "$hpa_check" ]]; then
         kubectl get hpa -n "$ns" -o yaml > "${ns_dir}/hpa.yaml" 2>/dev/null
-        echo -e "  \033[32m✓ HPAs collected\033[0m"
+        dump::__print_status "  \033[32m✓ HPAs collected\033[0m"
     else
-        echo -e "  \033[90m- No HPAs found\033[0m"
+        dump::__print_status "  \033[90m- No HPAs found\033[0m"
     fi
     
     # ScaledJobs (only if CRD exists)
@@ -477,12 +484,12 @@ function dump::__collect_namespace_data() {
         local sj_check=$(kubectl get scaledjobs -n "$ns" --no-headers 2>/dev/null)
         if [[ -n "$sj_check" ]]; then
             kubectl get scaledjobs -n "$ns" -o yaml > "${ns_dir}/scaledjobs.yaml" 2>/dev/null
-            echo -e "  \033[32m✓ ScaledJobs collected\033[0m"
+            dump::__print_status "  \033[32m✓ ScaledJobs collected\033[0m"
         else
-            echo -e "  \033[90m- No ScaledJobs found\033[0m"
+            dump::__print_status "  \033[90m- No ScaledJobs found\033[0m"
         fi
     else
-        echo -e "  \033[90m- ScaledJobs CRD not available (KEDA not installed)\033[0m"
+        dump::__print_status "  \033[90m- ScaledJobs CRD not available (KEDA not installed)\033[0m"
     fi
     
     # HTTPScaledObjects (only if CRD exists)
@@ -490,10 +497,10 @@ function dump::__collect_namespace_data() {
         local hso_check=$(kubectl get httpscaledobjects -n "$ns" --no-headers 2>/dev/null)
         if [[ -n "$hso_check" ]]; then
             kubectl get httpscaledobjects -n "$ns" -o yaml > "${ns_dir}/httpscaledobjects.yaml" 2>/dev/null
-            echo -e "  \033[32m✓ HTTPScaledObjects collected\033[0m"
+            dump::__print_status "  \033[32m✓ HTTPScaledObjects collected\033[0m"
             
             # Collect services referenced by HTTPScaledObjects
-            echo -e "  \033[36m- Collecting services referenced by HTTPScaledObjects...\033[0m"
+            dump::__print_status "  \033[36m- Collecting services referenced by HTTPScaledObjects...\033[0m"
             local services_yaml="${ns_dir}/httpscaledobjects-services.yaml"
             local services_found=false
             
@@ -542,22 +549,22 @@ function dump::__collect_namespace_data() {
                     fi
                     
                     if [[ "$hso_services_found" == "true" ]]; then
-                        echo -e "    \033[32m✓ Services for HTTPScaledObject '$hso_name' collected\033[0m"
+                        dump::__print_status "    \033[32m✓ Services for HTTPScaledObject '$hso_name' collected\033[0m"
                     else
-                        echo -e "    \033[90m- No services found for HTTPScaledObject '$hso_name'\033[0m"
+                        dump::__print_status "    \033[90m- No services found for HTTPScaledObject '$hso_name'\033[0m"
                     fi
                 done
             fi
             
             if [[ "$services_found" == "false" ]]; then
                 rm -f "$services_yaml"
-                echo -e "    \033[90m- No services found for any HTTPScaledObjects\033[0m"
+                dump::__print_status "    \033[90m- No services found for any HTTPScaledObjects\033[0m"
             fi
         else
-            echo -e "  \033[90m- No HTTPScaledObjects found\033[0m"
+            dump::__print_status "  \033[90m- No HTTPScaledObjects found\033[0m"
         fi
     else
-        echo -e "  \033[90m- HTTPScaledObjects CRD not available (HTTP Add-on not installed)\033[0m"
+        dump::__print_status "  \033[90m- HTTPScaledObjects CRD not available (HTTP Add-on not installed)\033[0m"
     fi
     
     # PodResourceProfiles (only if CRD exists)
@@ -565,12 +572,12 @@ function dump::__collect_namespace_data() {
         local prp_check=$(kubectl get podresourceprofiles -n "$ns" --no-headers 2>/dev/null)
         if [[ -n "$prp_check" ]]; then
             kubectl get podresourceprofiles -n "$ns" -o yaml > "${ns_dir}/podresourceprofiles.yaml" 2>/dev/null
-            echo -e "  \033[32m✓ PodResourceProfiles collected\033[0m"
+            dump::__print_status "  \033[32m✓ PodResourceProfiles collected\033[0m"
         else
-            echo -e "  \033[90m- No PodResourceProfiles found\033[0m"
+            dump::__print_status "  \033[90m- No PodResourceProfiles found\033[0m"
         fi
     else
-        echo -e "  \033[90m- PodResourceProfiles CRD not available (Kedify not installed)\033[0m"
+        dump::__print_status "  \033[90m- PodResourceProfiles CRD not available (Kedify not installed)\033[0m"
     fi
     
     # ScalingGroups (only if CRD exists)
@@ -578,12 +585,12 @@ function dump::__collect_namespace_data() {
         local sg_check=$(kubectl get scalinggroups -n "$ns" --no-headers 2>/dev/null)
         if [[ -n "$sg_check" ]]; then
             kubectl get scalinggroups -n "$ns" -o yaml > "${ns_dir}/scalinggroups.yaml" 2>/dev/null
-            echo -e "  \033[32m✓ ScalingGroups collected\033[0m"
+            dump::__print_status "  \033[32m✓ ScalingGroups collected\033[0m"
         else
-            echo -e "  \033[90m- No ScalingGroups found\033[0m"
+            dump::__print_status "  \033[90m- No ScalingGroups found\033[0m"
         fi
     else
-        echo -e "  \033[90m- ScalingGroups CRD not available (Kedify not installed)\033[0m"
+        dump::__print_status "  \033[90m- ScalingGroups CRD not available (Kedify not installed)\033[0m"
     fi
     
     # ScalingPolicies (only if CRD exists)
@@ -591,16 +598,16 @@ function dump::__collect_namespace_data() {
         local sp_check=$(kubectl get scalingpolicies -n "$ns" --no-headers 2>/dev/null)
         if [[ -n "$sp_check" ]]; then
             kubectl get scalingpolicies -n "$ns" -o yaml > "${ns_dir}/scalingpolicies.yaml" 2>/dev/null
-            echo -e "  \033[32m✓ ScalingPolicies collected\033[0m"
+            dump::__print_status "  \033[32m✓ ScalingPolicies collected\033[0m"
         else
-            echo -e "  \033[90m- No ScalingPolicies found\033[0m"
+            dump::__print_status "  \033[90m- No ScalingPolicies found\033[0m"
         fi
     else
-        echo -e "  \033[90m- ScalingPolicies CRD not available (Kedify not installed)\033[0m"
+        dump::__print_status "  \033[90m- ScalingPolicies CRD not available (Kedify not installed)\033[0m"
     fi
     
     # Collect Kedify OTel Add-on data if available (can be installed per namespace)
-    echo -e "\033[36mCollecting Kedify OTel Add-on data...\033[0m"
+    dump::__print_status "\033[36mCollecting Kedify OTel Add-on data...\033[0m"
     
     # Check for OTel Helm release secrets in this namespace
     local otel_helm_found=false
@@ -617,7 +624,7 @@ function dump::__collect_namespace_data() {
     
     # Collect OTel scaler service data if keda-otel-scaler service exists
     if kubectl get service keda-otel-scaler -n "$ns" >/dev/null 2>&1; then
-        echo -e "  \033[36m- Found keda-otel-scaler service, collecting metrics and memstore data...\033[0m"
+        dump::__print_status "  \033[36m- Found keda-otel-scaler service, collecting metrics and memstore data...\033[0m"
         
         # Set up port forwards for OTel scaler service
         set +m  # Disable job control to suppress messages
@@ -638,16 +645,16 @@ function dump::__collect_namespace_data() {
         
         # Collect metrics
         if curl -s --max-time 10 "http://localhost:8080/metrics" -o "${ns_dir}/kedify-otel-scaler-metrics.txt" 2>/dev/null; then
-            echo -e "    \033[32m✓ OTel scaler metrics collected\033[0m"
+            dump::__print_status "    \033[32m✓ OTel scaler metrics collected\033[0m"
         else
-            echo -e "    \033[31m✗ Failed to collect OTel scaler metrics\033[0m"
+            dump::__print_status "    \033[31m✗ Failed to collect OTel scaler metrics\033[0m"
         fi
         
         # Collect memstore data
         if curl -s --max-time 10 "http://localhost:9090/memstore/data" -o "${ns_dir}/kedify-otel-scaler-memstore.json" 2>/dev/null; then
-            echo -e "    \033[32m✓ OTel scaler memstore data collected\033[0m"
+            dump::__print_status "    \033[32m✓ OTel scaler memstore data collected\033[0m"
         else
-            echo -e "    \033[31m✗ Failed to collect OTel scaler memstore data\033[0m"
+            dump::__print_status "    \033[31m✗ Failed to collect OTel scaler memstore data\033[0m"
         fi
         
         # Cleanup OTel port forwards
@@ -657,17 +664,17 @@ function dump::__collect_namespace_data() {
         done
         set -m 2>/dev/null || true  # Re-enable job control
         
-        echo -e "  \033[32m✓ Kedify OTel Add-on service data collected\033[0m"
+        dump::__print_status "  \033[32m✓ Kedify OTel Add-on service data collected\033[0m"
         otel_helm_found=true
     fi
     
     if [[ "$otel_helm_found" == "false" ]]; then
-        echo -e "  \033[90m- No Kedify OTel Add-on found in this namespace\033[0m"
+        dump::__print_status "  \033[90m- No Kedify OTel Add-on found in this namespace\033[0m"
     fi
     
     # If this is the installation namespace, collect all pods and their logs
     if [[ "$is_installation_ns" == "true" ]]; then
-        echo -e "\033[36mCollecting installation data...\033[0m"
+        dump::__print_status "\033[36mCollecting installation data...\033[0m"
         
         # Get all pods in the installation namespace
         local all_pods
@@ -676,42 +683,42 @@ function dump::__collect_namespace_data() {
         # Collect pod manifests, descriptions, and logs
         if [[ ${#all_pods[@]} -gt 0 ]]; then
             for pod in "${all_pods[@]}"; do
-                echo -e "  \033[36m- Processing pod:\033[0m $pod"
-                kubectl get pod -n "$ns" "$pod" -o yaml > "${ns_dir}/${pod}-pod.yaml" 2>/dev/null || echo -e "    \033[31mFailed to get pod YAML for $pod\033[0m"
-                kubectl describe pod -n "$ns" "$pod" > "${ns_dir}/${pod}-pod.describe.txt" 2>/dev/null || echo -e "    \033[31mFailed to describe pod $pod\033[0m"
-                kubectl logs -n "$ns" "$pod" > "${ns_dir}/${pod}-logs.txt" 2>/dev/null || echo -e "    \033[31mFailed to get logs for $pod\033[0m"
+                dump::__print_status "  \033[36m- Processing pod:\033[0m $pod"
+                kubectl get pod -n "$ns" "$pod" -o yaml > "${ns_dir}/${pod}-pod.yaml" 2>/dev/null || dump::__print_status "    \033[31mFailed to get pod YAML for $pod\033[0m"
+                kubectl describe pod -n "$ns" "$pod" > "${ns_dir}/${pod}-pod.describe.txt" 2>/dev/null || dump::__print_status "    \033[31mFailed to describe pod $pod\033[0m"
+                kubectl logs -n "$ns" "$pod" > "${ns_dir}/${pod}-logs.txt" 2>/dev/null || dump::__print_status "    \033[31mFailed to get logs for $pod\033[0m"
                 
                 # Try to get previous logs if pod has restarted
                 kubectl logs -n "$ns" "$pod" --previous > "${ns_dir}/${pod}-logs-previous.txt" 2>/dev/null || true
             done
-            echo -e "  \033[32m✓ Pod data collected\033[0m"
+            dump::__print_status "  \033[32m✓ Pod data collected\033[0m"
         else
-            echo -e "  \033[90m- No pods found in installation namespace\033[0m"
+            dump::__print_status "  \033[90m- No pods found in installation namespace\033[0m"
         fi
         
         # Collect resource usage for all pods in the installation namespace
-        echo -e "  \033[36m- Collecting resource usage for all pods...\033[0m"
+        dump::__print_status "  \033[36m- Collecting resource usage for all pods...\033[0m"
         if kubectl top pod -n "$ns" --no-headers 2>/dev/null > "${ns_dir}/pods-resource-usage.txt"; then
-            echo -e "    \033[32m✓ Resource usage collected\033[0m"
+            dump::__print_status "    \033[32m✓ Resource usage collected\033[0m"
         else
-            echo -e "    \033[31m✗ Failed to get resource usage (metrics-server may not be available)\033[0m"
+            dump::__print_status "    \033[31m✗ Failed to get resource usage (metrics-server may not be available)\033[0m"
         fi
         
         # Collect Kedify resource
-        echo -e "  \033[36m- Collecting Kedify resource...\033[0m"
+        dump::__print_status "  \033[36m- Collecting Kedify resource...\033[0m"
         if kubectl get crd kedifyconfigurations.install.kedify.io >/dev/null 2>&1; then
             if kubectl get kedifyconfigurations -n "$ns" --no-headers 2>/dev/null | grep -q .; then
                 kubectl get kedifyconfigurations -n "$ns" -o yaml > "${ns_dir}/kedify-resource.yaml" 2>/dev/null
-                echo -e "    \033[32m✓ Kedify resource collected\033[0m"
+                dump::__print_status "    \033[32m✓ Kedify resource collected\033[0m"
             else
-                echo -e "    \033[90m- No Kedify resource found in this namespace\033[0m"
+                dump::__print_status "    \033[90m- No Kedify resource found in this namespace\033[0m"
             fi
         else
-            echo -e "    \033[90m- Kedify CRD not available (Kedify not installed)\033[0m"
+            dump::__print_status "    \033[90m- Kedify CRD not available (Kedify not installed)\033[0m"
         fi
         
         # Collect Helm installation information if available
-        echo -e "\033[36mCollecting Helm installation information...\033[0m"
+        dump::__print_status "\033[36mCollecting Helm installation information...\033[0m"
         local helm_secrets_found=false
         
         # Check for kedify-agent Helm release secret
@@ -735,12 +742,12 @@ function dump::__collect_namespace_data() {
         done
         
         if [[ "$helm_secrets_found" == "false" ]]; then
-            echo -e "    \033[90m- No Helm release secrets found (not installed via Helm)\033[0m"
+            dump::__print_status "    \033[90m- No Helm release secrets found (not installed via Helm)\033[0m"
         fi
         
         # Collect HTTP Add-on queue information if HTTP Add-on pods exist
         if kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" > /dev/null 2>&1; then
-            echo -e "  \033[36m- Collecting HTTP Add-on queue data...\033[0m"
+            dump::__print_status "  \033[36m- Collecting HTTP Add-on queue data...\033[0m"
             
             # Individual queue data (per pod) - formatted as table
             dump::__collect_http_addon_queue_data "$ns" "$ns_dir" "" "individual" "http-addon-queue-individual.txt" "Failed to collect individual queue data"
@@ -751,15 +758,15 @@ function dump::__collect_namespace_data() {
             # JSON format for programmatic access - individual mode
             dump::__collect_http_addon_queue_data "$ns" "$ns_dir" "json" "individual" "http-addon-queue.json" "Failed to collect JSON queue data"
             
-            echo -e "    \033[32m✓ HTTP Add-on queue data collected\033[0m"
+            dump::__print_status "    \033[32m✓ HTTP Add-on queue data collected\033[0m"
         fi
     fi
     
     # Clear the trap as we're ending the function normally
     trap - INT TERM EXIT
     
-    echo -e "\033[32mCompleted: $ns\033[0m"
-    echo ""
+    dump::__print_status "\033[32mCompleted: $ns\033[0m"
+    dump::__print_status ""
 }
 
 function dump::cmd() {
@@ -832,6 +839,7 @@ function dump::cmd() {
     local output_dir="."
     local create_archive="false"
     local all_namespaces="false"
+    local quiet_mode="false"
     local next="false"
     local next_type=""
     
@@ -886,6 +894,10 @@ function dump::cmd() {
             -A|--all-namespaces)
                 all_namespaces="true"
                 ;;
+            -q|--quiet)
+                quiet_mode="true"
+                QUIET_MODE="true"
+                ;;
             --archive)
                 create_archive="true"
                 ;;
@@ -896,6 +908,7 @@ function dump::cmd() {
                 echo "  -o|--output         ... output directory or archive file path (default: current directory)"
                 echo "  -n|--namespace      ... specific namespace (default: current namespace)"
                 echo "  -A|--all-namespaces ... collect from all namespaces"
+                echo "  -q|--quiet          ... quiet mode - suppress all status output"
                 echo "  --archive           ... create tar.gz archive"
                 dump::__print_usage
                 exit 1
@@ -927,93 +940,93 @@ function dump::cmd() {
         mkdir -p "$tempdir"
     fi
     
-    echo ""
+    dump::__print_status ""
     if command -v figlet >/dev/null 2>&1; then
-        figlet dump
+        dump::__print_status "$(figlet dump)"
     else
-        echo "DUMP"
+        dump::__print_status "DUMP"
     fi
-    echo ""
-    echo -e "\033[36mOutput directory:\033[0m $tempdir"
-    echo -e "\033[36mKubectl context:\033[0m $(kubectl config current-context)"
+    dump::__print_status ""
+    dump::__print_status "\033[36mOutput directory:\033[0m $tempdir"
+    dump::__print_status "\033[36mKubectl context:\033[0m $(kubectl config current-context)"
     
     # Determine installation namespace (where Kedify/KEDA is installed)
     local installation_ns=""
     if kubectl get crd kedifyconfigurations.install.kedify.io >/dev/null 2>&1 && kubectl get kedifyconfigurations -A > /dev/null 2>&1; then
         installation_ns=$(kubectl get kedifyconfigurations -A -o json | jq -r '.items[0].metadata.namespace')
-        echo -e "\033[36mDetected Kedify installation in namespace:\033[0m $installation_ns"
+        dump::__print_status "\033[36mDetected Kedify installation in namespace:\033[0m $installation_ns"
     elif kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
         # Try to find KEDA operator deployment
         local keda_ns=$(kubectl get deployments --all-namespaces -l app.kubernetes.io/name=keda-operator -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo "")
         if [[ -n "$keda_ns" ]]; then
             installation_ns="$keda_ns"
-            echo -e "\033[36mDetected KEDA installation in namespace:\033[0m $installation_ns"
+            dump::__print_status "\033[36mDetected KEDA installation in namespace:\033[0m $installation_ns"
         else
             installation_ns="keda"
-            echo -e "\033[36mKEDA CRDs found, assuming namespace:\033[0m $installation_ns"
+            dump::__print_status "\033[36mKEDA CRDs found, assuming namespace:\033[0m $installation_ns"
         fi
     else
         # Default to keda namespace if we can't detect anything
         installation_ns="keda"
-        echo -e "\033[36mNo Kedify/KEDA detected, assuming namespace:\033[0m $installation_ns"
+        dump::__print_status "\033[36mNo Kedify/KEDA detected, assuming namespace:\033[0m $installation_ns"
     fi
     
     # Collect namespaces to process
     local namespaces=()
     if [[ "$all_namespaces" == "true" ]]; then
         IFS=$'\n' read -d '' -r -a namespaces < <(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' && printf '\0')
-        echo -e "\033[36mScope:\033[0m All namespaces (${#namespaces[@]} total)"
+        dump::__print_status "\033[36mScope:\033[0m All namespaces (${#namespaces[@]} total)"
     else
         if [[ -n "$target_ns" ]]; then
             namespaces=("$target_ns")
         else
             namespaces=("$current_ns")
         fi
-        echo -e "\033[36mScope:\033[0m Namespace - ${namespaces[*]}"
+        dump::__print_status "\033[36mScope:\033[0m Namespace - ${namespaces[*]}"
     fi
-    echo ""
+    dump::__print_status ""
     
-    echo -e "\033[33m=== Processing Cluster Information ===\033[0m"
+    dump::__print_status "\033[33m=== Processing Cluster Information ===\033[0m"
     
     # Create cluster information directory
     local cluster_dir="${tempdir}/_cluster-info"
     mkdir -p "$cluster_dir"
     
     # Node Information Section
-    echo -e "\033[36mCollecting node information...\033[0m"
+    dump::__print_status "\033[36mCollecting node information...\033[0m"
     
     # Node resource usage
     if kubectl top nodes --no-headers 2>/dev/null > "${cluster_dir}/cluster-nodes-resource-usage.txt"; then
-        echo -e "  \033[32m✓ Node resource usage collected\033[0m"
+        dump::__print_status "  \033[32m✓ Node resource usage collected\033[0m"
     else
-        echo -e "  \033[31m✗ Failed to get node resource usage (metrics-server may not be available)\033[0m"
+        dump::__print_status "  \033[31m✗ Failed to get node resource usage (metrics-server may not be available)\033[0m"
     fi
     
     # Node details and conditions
     if kubectl get nodes -o yaml > "${cluster_dir}/cluster-nodes.yaml" 2>/dev/null; then
-        echo -e "  \033[32m✓ Node details collected\033[0m"
+        dump::__print_status "  \033[32m✓ Node details collected\033[0m"
     else
-        echo -e "  \033[31m✗ Failed to collect node details\033[0m"
+        dump::__print_status "  \033[31m✗ Failed to collect node details\033[0m"
     fi
     
     # Node descriptions (includes conditions, taints, allocatable resources)
     kubectl get nodes --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | while read -r node; do
         kubectl describe node "$node" > "${cluster_dir}/cluster-node-${node}-describe.txt" 2>/dev/null || true
     done
-    echo -e "  \033[32m✓ Node descriptions collected\033[0m"
+    dump::__print_status "  \033[32m✓ Node descriptions collected\033[0m"
     
     # Pod resource requests vs node capacity
     local resource_allocation_temp="${cluster_dir}/cluster-resource-allocation-temp.txt"
     if kubectl describe nodes 2>/dev/null | grep -A 15 "Allocated resources:" > "$resource_allocation_temp" 2>/dev/null && [[ -s "$resource_allocation_temp" ]]; then
         mv "$resource_allocation_temp" "${cluster_dir}/cluster-resource-allocation.txt"
-        echo -e "  \033[32m✓ Resource allocation summary collected\033[0m"
+        dump::__print_status "  \033[32m✓ Resource allocation summary collected\033[0m"
     else
         rm -f "$resource_allocation_temp"
-        echo -e "  \033[31m✗ Failed to collect resource allocation summary\033[0m"
+        dump::__print_status "  \033[31m✗ Failed to collect resource allocation summary\033[0m"
     fi
     
     # Cluster Infrastructure Section
-    echo -e "\033[36mCollecting cluster infrastructure data...\033[0m"
+    dump::__print_status "\033[36mCollecting cluster infrastructure data...\033[0m"
     
     # Cluster autoscaler detection and comprehensive data collection
     local autoscaler_detected="false"
@@ -1026,7 +1039,7 @@ function dump::cmd() {
     fi
     
     if [[ "$autoscaler_detected" == "true" ]]; then
-        echo -e "  \033[36m- Collecting Cluster Autoscaler data...\033[0m"
+        dump::__print_status "  \033[36m- Collecting Cluster Autoscaler data...\033[0m"
         
         # Cluster autoscaler events
         local autoscaler_events_temp="${cluster_dir}/cluster-autoscaler-events-temp.yaml"
@@ -1034,19 +1047,19 @@ function dump::cmd() {
             # Check if the file has actual events (not just empty YAML structure)
             if grep -q "^- " "$autoscaler_events_temp" 2>/dev/null; then
                 mv "$autoscaler_events_temp" "${cluster_dir}/cluster-autoscaler-events.yaml"
-                echo -e "    \033[32m✓ Cluster autoscaler events collected\033[0m"
+                dump::__print_status "    \033[32m✓ Cluster autoscaler events collected\033[0m"
             else
                 rm -f "$autoscaler_events_temp"
-                echo -e "    \033[90m- No cluster autoscaler events found\033[0m"
+                dump::__print_status "    \033[90m- No cluster autoscaler events found\033[0m"
             fi
         else
             rm -f "$autoscaler_events_temp"
             # Fallback: collect all events and filter for autoscaler-related ones
             if kubectl get events --all-namespaces --sort-by='.lastTimestamp' -o yaml 2>/dev/null | grep -A 10 -B 5 -i "autoscaler\|scaled.*group\|node.*pressure\|insufficient.*resources" > "${cluster_dir}/cluster-autoscaler-events.yaml" 2>/dev/null && [[ -s "${cluster_dir}/cluster-autoscaler-events.yaml" ]]; then
-                echo -e "    \033[32m✓ Cluster autoscaler events collected (filtered)\033[0m"
+                dump::__print_status "    \033[32m✓ Cluster autoscaler events collected (filtered)\033[0m"
             else
                 rm -f "${cluster_dir}/cluster-autoscaler-events.yaml"
-                echo -e "    \033[90m- No cluster autoscaler events found\033[0m"
+                dump::__print_status "    \033[90m- No cluster autoscaler events found\033[0m"
             fi
         fi
         
@@ -1054,25 +1067,25 @@ function dump::cmd() {
         kubectl get deployments --all-namespaces -l app=cluster-autoscaler -o yaml > "${cluster_dir}/cluster-autoscaler-deployments.yaml" 2>/dev/null || \
         kubectl get deployments --all-namespaces --field-selector metadata.name=cluster-autoscaler -o yaml > "${cluster_dir}/cluster-autoscaler-deployments.yaml" 2>/dev/null
         if [[ -s "${cluster_dir}/cluster-autoscaler-deployments.yaml" ]]; then
-            echo -e "    \033[32m✓ Cluster autoscaler deployments collected\033[0m"
+            dump::__print_status "    \033[32m✓ Cluster autoscaler deployments collected\033[0m"
         else
             rm -f "${cluster_dir}/cluster-autoscaler-deployments.yaml"
-            echo -e "    \033[90m- No cluster autoscaler deployments found\033[0m"
+            dump::__print_status "    \033[90m- No cluster autoscaler deployments found\033[0m"
         fi
         
         # Cluster autoscaler pods and their status
         kubectl get pods --all-namespaces -l app=cluster-autoscaler -o yaml > "${cluster_dir}/cluster-autoscaler-pods.yaml" 2>/dev/null
         if [[ -s "${cluster_dir}/cluster-autoscaler-pods.yaml" ]]; then
-            echo -e "    \033[32m✓ Cluster autoscaler pods collected\033[0m"
+            dump::__print_status "    \033[32m✓ Cluster autoscaler pods collected\033[0m"
         else
             rm -f "${cluster_dir}/cluster-autoscaler-pods.yaml"
             # Fallback: search by name pattern
             kubectl get pods --all-namespaces --field-selector metadata.name~=cluster-autoscaler -o yaml > "${cluster_dir}/cluster-autoscaler-pods.yaml" 2>/dev/null || true
             if [[ -s "${cluster_dir}/cluster-autoscaler-pods.yaml" ]]; then
-                echo -e "    \033[32m✓ Cluster autoscaler pods collected (by name)\033[0m"
+                dump::__print_status "    \033[32m✓ Cluster autoscaler pods collected (by name)\033[0m"
             else
                 rm -f "${cluster_dir}/cluster-autoscaler-pods.yaml"
-                echo -e "    \033[90m- No cluster autoscaler pods found\033[0m"
+                dump::__print_status "    \033[90m- No cluster autoscaler pods found\033[0m"
             fi
         fi
         
@@ -1084,9 +1097,9 @@ function dump::cmd() {
             fi
         done
         if ls "${cluster_dir}"/cluster-autoscaler-config-*.yaml >/dev/null 2>&1; then
-            echo -e "    \033[32m✓ Cluster autoscaler configuration collected\033[0m"
+            dump::__print_status "    \033[32m✓ Cluster autoscaler configuration collected\033[0m"
         else
-            echo -e "    \033[90m- No cluster autoscaler configuration found\033[0m"
+            dump::__print_status "    \033[90m- No cluster autoscaler configuration found\033[0m"
         fi
         
         # Cluster autoscaler controller logs
@@ -1098,9 +1111,9 @@ function dump::cmd() {
             fi
         done
         if ls "${cluster_dir}"/cluster-autoscaler-*-logs.txt >/dev/null 2>&1; then
-            echo -e "    \033[32m✓ Cluster autoscaler controller logs collected\033[0m"
+            dump::__print_status "    \033[32m✓ Cluster autoscaler controller logs collected\033[0m"
         else
-            echo -e "    \033[90m- No cluster autoscaler controller logs found\033[0m"
+            dump::__print_status "    \033[90m- No cluster autoscaler controller logs found\033[0m"
         fi
         
         # Cluster autoscaler status (from status API if available)
@@ -1123,12 +1136,12 @@ function dump::cmd() {
             fi
         done
         if ls "${cluster_dir}"/cluster-autoscaler-*-status.json >/dev/null 2>&1; then
-            echo -e "    \033[32m✓ Cluster autoscaler status collected\033[0m"
+            dump::__print_status "    \033[32m✓ Cluster autoscaler status collected\033[0m"
         else
-            echo -e "    \033[90m- No cluster autoscaler status API available\033[0m"
+            dump::__print_status "    \033[90m- No cluster autoscaler status API available\033[0m"
         fi
     else
-        echo -e "  \033[90m- Cluster autoscaler not detected\033[0m"
+        dump::__print_status "  \033[90m- Cluster autoscaler not detected\033[0m"
         
         # Still collect general autoscaler events even if deployment not found
         local autoscaler_events_temp="${cluster_dir}/cluster-autoscaler-events-temp.yaml"
@@ -1136,7 +1149,7 @@ function dump::cmd() {
             # Check if the file has actual events (not just empty YAML structure)
             if grep -q "^- " "$autoscaler_events_temp" 2>/dev/null; then
                 mv "$autoscaler_events_temp" "${cluster_dir}/cluster-autoscaler-events.yaml"
-                echo -e "  \033[32m✓ Cluster autoscaler events collected\033[0m"
+                dump::__print_status "  \033[32m✓ Cluster autoscaler events collected\033[0m"
             else
                 rm -f "$autoscaler_events_temp"
             fi
@@ -1156,37 +1169,37 @@ function dump::cmd() {
     fi
     
     if [[ "$karpenter_detected" == "true" ]]; then
-        echo -e "  \033[36m- Collecting Karpenter data...\033[0m"
+        dump::__print_status "  \033[36m- Collecting Karpenter data...\033[0m"
         
         # Karpenter events
         local karpenter_events_temp="${cluster_dir}/karpenter-events-temp.yaml"
         if kubectl get events --all-namespaces --sort-by='.lastTimestamp' -o yaml 2>/dev/null | grep -A 10 -B 5 -i "karpenter\|provisioner\|nodepool\|nodeclaim" > "$karpenter_events_temp" 2>/dev/null && [[ -s "$karpenter_events_temp" ]]; then
             mv "$karpenter_events_temp" "${cluster_dir}/karpenter-events.yaml"
-            echo -e "    \033[32m✓ Karpenter events collected\033[0m"
+            dump::__print_status "    \033[32m✓ Karpenter events collected\033[0m"
         else
             rm -f "$karpenter_events_temp"
-            echo -e "    \033[90m- No Karpenter events found\033[0m"
+            dump::__print_status "    \033[90m- No Karpenter events found\033[0m"
         fi
         
         # Karpenter NodePools (v1beta1)
         if kubectl get nodepools.karpenter.sh -o yaml > "${cluster_dir}/karpenter-nodepools.yaml" 2>/dev/null && [[ -s "${cluster_dir}/karpenter-nodepools.yaml" ]]; then
-            echo -e "    \033[32m✓ Karpenter NodePools collected\033[0m"
+            dump::__print_status "    \033[32m✓ Karpenter NodePools collected\033[0m"
         else
             rm -f "${cluster_dir}/karpenter-nodepools.yaml"
-            echo -e "    \033[90m- No Karpenter NodePools found\033[0m"
+            dump::__print_status "    \033[90m- No Karpenter NodePools found\033[0m"
         fi
         
         # Karpenter NodeClaims (v1beta1)
         if kubectl get nodeclaims.karpenter.sh -o yaml > "${cluster_dir}/karpenter-nodeclaims.yaml" 2>/dev/null && [[ -s "${cluster_dir}/karpenter-nodeclaims.yaml" ]]; then
-            echo -e "    \033[32m✓ Karpenter NodeClaims collected\033[0m"
+            dump::__print_status "    \033[32m✓ Karpenter NodeClaims collected\033[0m"
         else
             rm -f "${cluster_dir}/karpenter-nodeclaims.yaml"
-            echo -e "    \033[90m- No Karpenter NodeClaims found\033[0m"
+            dump::__print_status "    \033[90m- No Karpenter NodeClaims found\033[0m"
         fi
         
         # Legacy Karpenter Provisioners (v1alpha5 - for backward compatibility)
         if kubectl get provisioners.karpenter.sh -o yaml > "${cluster_dir}/karpenter-provisioners.yaml" 2>/dev/null && [[ -s "${cluster_dir}/karpenter-provisioners.yaml" ]]; then
-            echo -e "    \033[32m✓ Karpenter Provisioners (legacy) collected\033[0m"
+            dump::__print_status "    \033[32m✓ Karpenter Provisioners (legacy) collected\033[0m"
         else
             rm -f "${cluster_dir}/karpenter-provisioners.yaml"
         fi
@@ -1199,24 +1212,24 @@ function dump::cmd() {
                     kubectl logs -n karpenter "$pod" --previous --tail=1000 > "${cluster_dir}/karpenter-${pod}-logs-previous.txt" 2>/dev/null || true
                 fi
             done
-            echo -e "    \033[32m✓ Karpenter controller logs collected\033[0m"
+            dump::__print_status "    \033[32m✓ Karpenter controller logs collected\033[0m"
         fi
     else
-        echo -e "  \033[90m- Karpenter not detected\033[0m"
+        dump::__print_status "  \033[90m- Karpenter not detected\033[0m"
     fi
     
     # Pending pods (may indicate resource constraints)
     local pending_count=$(kubectl get pods --all-namespaces --field-selector=status.phase=Pending --no-headers 2>/dev/null | wc -l)
     if [[ $pending_count -gt 0 ]]; then
         kubectl get pods --all-namespaces --field-selector=status.phase=Pending -o yaml > "${cluster_dir}/cluster-pending-pods.yaml" 2>/dev/null
-        echo -e "  \033[33m⚠ Found $pending_count pending pod(s) - may indicate resource constraints\033[0m"
+        dump::__print_status "  \033[33m⚠ Found $pending_count pending pod(s) - may indicate resource constraints\033[0m"
     else
-        echo -e "  \033[32m✓ No pending pods found\033[0m"
+        dump::__print_status "  \033[32m✓ No pending pods found\033[0m"
     fi
     
-    echo -e "\033[32mCompleted: cluster information\033[0m"
+    dump::__print_status "\033[32mCompleted: cluster information\033[0m"
     
-    echo ""
+    dump::__print_status ""
     
     # Always include installation namespace if not already included
     local include_installation="true"
@@ -1290,9 +1303,9 @@ function dump::cmd() {
     fi
     
     # Generate cluster health summary
-    echo -e "\033[36mGenerating cluster health summary...\033[0m"
+    dump::__print_status "\033[36mGenerating cluster health summary...\033[0m"
     dump::__generate_cluster_health_summary "$tempdir" "$cluster_dir"
-    echo -e "  \033[32m✓ Cluster health summary generated\033[0m"
+    dump::__print_status "  \033[32m✓ Cluster health summary generated\033[0m"
     
     # Create summary file
     cat > "${tempdir}/dump-summary.txt" << EOF
@@ -1372,20 +1385,20 @@ EOF
             archive_file="$(pwd)/${archive_file}"
         fi
         
-        echo -e "\033[36mCreating tar.gz archive:\033[0m $archive_file"
+        dump::__print_status "\033[36mCreating tar.gz archive:\033[0m $archive_file"
         (cd "$tempdir" && tar -czf "$archive_file" . >/dev/null 2>&1)
         rm -rf "$tempdir"
-        echo ""
-        echo -e "\033[32mDiagnostic information saved to:\033[0m $archive_file"
+        dump::__print_status ""
+        dump::__print_status "\033[32mDiagnostic information saved to:\033[0m $archive_file"
     else
-        echo ""
-        echo -e "\033[32m=== Collection Complete! ===\033[0m"
-        echo ""
-        echo -e "\033[32mDiagnostic information saved to:\033[0m $tempdir"
-        echo ""
-        echo -e "\033[36mQuick commands to explore:\033[0m"
-        echo "   ls -la $tempdir"
-        echo "   cat $tempdir/dump-summary.txt"
+        dump::__print_status ""
+        dump::__print_status "\033[32m=== Collection Complete! ===\033[0m"
+        dump::__print_status ""
+        dump::__print_status "\033[32mDiagnostic information saved to:\033[0m $tempdir"
+        dump::__print_status ""
+        dump::__print_status "\033[36mQuick commands to explore:\033[0m"
+        dump::__print_status "   ls -la $tempdir"
+        dump::__print_status "   cat $tempdir/dump-summary.txt"
     fi
 }
 
@@ -1507,7 +1520,7 @@ function dump::__extract_helm_release_data() {
     local output_dir="$3"
     local file_prefix="$4"  # Optional prefix for output files (e.g., "helm-" or "")
     
-    echo -e "  \033[36m- Found Helm release secret: $secret_name\033[0m"
+    dump::__print_status "  \033[36m- Found Helm release secret: $secret_name\033[0m"
     
     local helm_data=$(kubectl get secret -n "$ns" "$secret_name" -o jsonpath='{.data.release}' 2>/dev/null)
     if [[ -n "$helm_data" ]]; then
@@ -1517,10 +1530,10 @@ function dump::__extract_helm_release_data() {
         if echo "$helm_data" | base64 -d | base64 -d | gunzip 2>/dev/null > "$temp_release"; then
             # Extract values and convert to YAML
             if jq -r '.chart.values // empty' "$temp_release" 2>/dev/null | yq -P > "${output_dir}/${file_prefix}${safe_name}-values.yaml" 2>/dev/null && [[ -s "${output_dir}/${file_prefix}${safe_name}-values.yaml" ]]; then
-                echo -e "    \033[32m✓ Helm values extracted for $secret_name\033[0m"
+                dump::__print_status "    \033[32m✓ Helm values extracted for $secret_name\033[0m"
             else
                 rm -f "${output_dir}/${file_prefix}${safe_name}-values.yaml"
-                echo -e "    \033[90m- No Helm values found in release data for $secret_name\033[0m"
+                dump::__print_status "    \033[90m- No Helm values found in release data for $secret_name\033[0m"
             fi
             
             # Extract version information
@@ -1539,7 +1552,7 @@ function dump::__extract_helm_release_data() {
                     echo ""
                     echo "# For complete values, see: ${file_prefix}${safe_name}-values.yaml"
                 } > "${output_dir}/${file_prefix}${safe_name}-info.txt"
-                echo -e "    \033[32m✓ Helm version information extracted for $secret_name\033[0m"
+                dump::__print_status "    \033[32m✓ Helm version information extracted for $secret_name\033[0m"
             fi
             
             # Clean up temp file
@@ -1547,11 +1560,11 @@ function dump::__extract_helm_release_data() {
             return 0  # Success
         else
             rm -f "$temp_release"
-            echo -e "    \033[31m✗ Failed to decode Helm release data for $secret_name\033[0m"
+            dump::__print_status "    \033[31m✗ Failed to decode Helm release data for $secret_name\033[0m"
             return 1  # Failure
         fi
     else
-        echo -e "    \033[31m✗ Failed to extract Helm release data from secret $secret_name\033[0m"
+        dump::__print_status "    \033[31m✗ Failed to extract Helm release data from secret $secret_name\033[0m"
         return 1  # Failure
     fi
 }

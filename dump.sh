@@ -644,6 +644,93 @@ function dump::__collect_namespace_data() {
             echo -e "    \033[90m- Kedify CRD not available (Kedify not installed)\033[0m"
         fi
         
+        # Collect Helm installation information if available
+        echo -e "  \033[36m- Collecting Helm installation information...\033[0m"
+        local helm_secrets_found=false
+        
+        # Check for kedify-agent Helm release secret
+        if kubectl get secret -n "$ns" sh.helm.release.v1.kedify-agent.v1 >/dev/null 2>&1; then
+            echo -e "    \033[36m- Found Kedify Helm release secret...\033[0m"
+            
+            # Extract and decode the Helm release data (double base64-encoded + gzip)
+            local helm_data=$(kubectl get secret -n "$ns" sh.helm.release.v1.kedify-agent.v1 -o jsonpath='{.data.release}' 2>/dev/null)
+            if [[ -n "$helm_data" ]]; then
+                # Decode base64 twice and decompress (Helm uses double base64 encoding + gzip compression)
+                local temp_release=$(mktemp)
+                if echo "$helm_data" | base64 -d | base64 -d | gunzip 2>/dev/null > "$temp_release"; then
+                    # Extract values from the release data and convert to YAML
+                    if jq -r '.chart.values // empty' "$temp_release" 2>/dev/null | yq -P > "${ns_dir}/helm-kedify-agent-values.yaml" 2>/dev/null && [[ -s "${ns_dir}/helm-kedify-agent-values.yaml" ]]; then
+                        echo -e "      \033[32m✓ Kedify Helm values extracted\033[0m"
+                    else
+                        rm -f "${ns_dir}/helm-kedify-agent-values.yaml"
+                        echo -e "      \033[90m- No Helm values found in release data\033[0m"
+                    fi
+                    
+                    # Extract version information
+                    local chart_version=$(jq -r '.chart.metadata.version // empty' "$temp_release" 2>/dev/null)
+                    local app_version=$(jq -r '.chart.metadata.appVersion // empty' "$temp_release" 2>/dev/null)
+                    local release_version=$(jq -r '.version // empty' "$temp_release" 2>/dev/null)
+                    
+                    if [[ -n "$chart_version" || -n "$app_version" || -n "$release_version" ]]; then
+                        {
+                            echo "# Kedify Helm Installation Information"
+                            echo "# Generated: $(date)"
+                            echo ""
+                            [[ -n "$chart_version" ]] && echo "Chart Version: $chart_version"
+                            [[ -n "$app_version" ]] && echo "App Version: $app_version"
+                            [[ -n "$release_version" ]] && echo "Release Version: $release_version"
+                            echo ""
+                            echo "# For complete values, see: helm-kedify-agent-values.yaml"
+                        } > "${ns_dir}/helm-kedify-agent-info.txt"
+                        echo -e "      \033[32m✓ Kedify Helm version information extracted\033[0m"
+                    fi
+                    
+                    # Clean up temp file
+                    rm -f "$temp_release"
+                    helm_secrets_found=true
+                else
+                    rm -f "$temp_release"
+                    echo -e "      \033[31m✗ Failed to decode Helm release data\033[0m"
+                fi
+            else
+                echo -e "      \033[31m✗ Failed to extract Helm release data from secret\033[0m"
+            fi
+        fi
+        
+        # Check for other common Helm release secrets (keda, keda-add-ons-http, etc.)
+        local helm_release_patterns=("sh.helm.release.v1.keda.v*" "sh.helm.release.v1.keda-add-ons-http.v*" "sh.helm.release.v1.kedify.v*")
+        for pattern in "${helm_release_patterns[@]}"; do
+            while IFS= read -r secret_name; do
+                if [[ -n "$secret_name" && "$secret_name" != "sh.helm.release.v1.kedify-agent.v1" ]]; then
+                    echo -e "    \033[36m- Found additional Helm release secret: $secret_name\033[0m"
+                    
+                    local helm_data=$(kubectl get secret -n "$ns" "$secret_name" -o jsonpath='{.data.release}' 2>/dev/null)
+                    if [[ -n "$helm_data" ]]; then
+                        local safe_name=$(echo "$secret_name" | tr '.' '_')
+                        local temp_release=$(mktemp)
+                        if echo "$helm_data" | base64 -d | base64 -d | gunzip 2>/dev/null > "$temp_release"; then
+                            # Extract values and convert to YAML
+                            if jq -r '.chart.values // empty' "$temp_release" 2>/dev/null | yq -P > "${ns_dir}/helm-${safe_name}-values.yaml" 2>/dev/null && [[ -s "${ns_dir}/helm-${safe_name}-values.yaml" ]]; then
+                                echo -e "      \033[32m✓ Helm values extracted for $secret_name\033[0m"
+                            else
+                                rm -f "${ns_dir}/helm-${safe_name}-values.yaml"
+                            fi
+                            
+                            # Clean up temp file
+                            rm -f "$temp_release"
+                            helm_secrets_found=true
+                        else
+                            rm -f "$temp_release"
+                        fi
+                    fi
+                fi
+            done < <(kubectl get secrets -n "$ns" -o name 2>/dev/null | grep -E "^secret/${pattern//\*/.*}$" | sed 's|^secret/||' || true)
+        done
+        
+        if [[ "$helm_secrets_found" == "false" ]]; then
+            echo -e "    \033[90m- No Helm release secrets found (not installed via Helm)\033[0m"
+        fi
+        
         # Collect HTTP Add-on queue information if HTTP Add-on pods exist
         if kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" > /dev/null 2>&1; then
             echo -e "  \033[36m- Collecting HTTP Add-on queue data...\033[0m"
@@ -693,6 +780,14 @@ function dump::cmd() {
         missing_tools+=("yq")
     fi
     
+    if ! command -v gunzip >/dev/null 2>&1; then
+        missing_tools+=("gunzip")
+    fi
+    
+    if ! command -v base64 >/dev/null 2>&1; then
+        missing_tools+=("base64")
+    fi
+    
     # Report missing tools
     if [[ ${#missing_tools[@]} -gt 0 ]]; then
         echo "Error: The following required tools are missing:"
@@ -705,16 +800,16 @@ function dump::cmd() {
         echo "    brew install curl jq kubectl yq coreutils"
         echo ""
         echo "  Ubuntu/Debian:"
-        echo "    sudo apt-get install curl jq kubectl util-linux"
+        echo "    sudo apt-get install curl jq kubectl util-linux gzip tar coreutils"
         echo "    # For yq: sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 && sudo chmod +x /usr/local/bin/yq"
         echo ""
         echo "  CentOS/RHEL:"
-        echo "    sudo yum install curl jq util-linux"
+        echo "    sudo yum install curl jq util-linux gzip tar coreutils"
         echo "    # Install kubectl: https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/"
         echo "    # For yq: sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 && sudo chmod +x /usr/local/bin/yq"
         echo ""
         echo "  Alpine:"
-        echo "    apk add curl jq kubectl yq util-linux"
+        echo "    apk add curl jq kubectl yq util-linux gzip tar coreutils"
         echo ""
         echo "  Windows (using Chocolatey):"
         echo "    choco install curl jq kubernetes-cli yq"
@@ -1230,10 +1325,21 @@ Per-namespace Files:
 - scaledjobs.yaml                         ... ScaledJob resources (if any)
 - httpscaledobjects.yaml                  ... HTTPScaledObject resources (if any)
 - httpscaledobjects-services.yaml         ... Services referenced by HTTPScaledObjects (if any)
+- podresourceprofiles.yaml                ... PodResourceProfile resources (if any)
+- scalinggroups.yaml                      ... ScalingGroup resources (if any)
+- scalingpolicies.yaml                    ... ScalingPolicy resources (if any)
 - kedify-proxy-*-pod.yaml                 ... Pod manifests for kedify-proxy pods
 - kedify-proxy-*-logs.txt                 ... Logs from kedify-proxy pods
 - kedify-proxy-*-config_dump.json         ... Envoy configuration dumps
 - kedify-proxy-*-prometheus.txt           ... Prometheus metrics from kedify-proxy
+
+Installation namespace additional files:
+- kedify-resource.yaml                    ... KedifyConfiguration resource (if any)
+- helm-kedify-agent-values.yaml           ... Kedify Helm values used during installation (if available)
+- helm-kedify-agent-info.txt              ... Kedify Helm version information (if available)
+- helm-*-values.yaml                      ... Additional Helm values files (KEDA, HTTP Add-on, etc.)
+- http-addon-queue-*.txt                  ... HTTP Add-on queue data in table format
+- http-addon-queue.json                   ... HTTP Add-on queue data in JSON format
 
 Directory Structure:
 $(find "$tempdir" -type d | sort)

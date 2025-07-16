@@ -121,31 +121,44 @@ export DIR
 # Source all .sh scripts
 $(for script in "${sh_scripts[@]}"; do [[ -n "$script" ]] && echo "source $script"; done)
 
-# Test that key functions are defined (if they exist)
+# Dynamically find all module command functions
+# These are functions that follow the pattern: <module>::cmd or <module>_cmd
+module_functions=\$(declare -F | awk '{print \$3}' | grep -E '(::cmd|_cmd)\$' | grep -v '^_')
 functions_found=0
 
-if declare -f debug::cmd >/dev/null 2>&1; then
-    echo "DEBUG_FUNCTION_OK"
-    functions_found=\$((functions_found + 1))
-fi
+echo "DISCOVERED_MODULES:"
+for func in \$module_functions; do
+    if declare -f "\$func" >/dev/null 2>&1; then
+        echo "MODULE_FUNCTION_OK=\$func"
+        functions_found=\$((functions_found + 1))
+    fi
+done
 
-if declare -f insights_cmd >/dev/null 2>&1; then
-    echo "INSIGHTS_FUNCTION_OK" 
-    functions_found=\$((functions_found + 1))
-fi
-
-# Check for any other exported functions
+# Check for any other exported functions (helper functions, etc.)
 all_functions=\$(declare -F | awk '{print \$3}' | grep -v '^_' | wc -l)
 echo "TOTAL_FUNCTIONS_FOUND=\$all_functions"
-echo "KEY_FUNCTIONS_FOUND=\$functions_found"
+echo "MODULE_FUNCTIONS_FOUND=\$functions_found"
 echo "ALL_FUNCTIONS_OK"
 EOF
     
     if output=$(bash "$test_script" 2>/dev/null); then
         if echo "$output" | grep -q "ALL_FUNCTIONS_OK"; then
             local total_functions=$(echo "$output" | grep "TOTAL_FUNCTIONS_FOUND=" | cut -d'=' -f2)
-            local key_functions=$(echo "$output" | grep "KEY_FUNCTIONS_FOUND=" | cut -d'=' -f2)
-            print_pass "All scripts loaded successfully ($total_functions total functions, $key_functions key functions)"
+            local module_functions=$(echo "$output" | grep "MODULE_FUNCTIONS_FOUND=" | cut -d'=' -f2)
+            
+            # Display discovered modules
+            local discovered_modules=()
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^MODULE_FUNCTION_OK=(.+)$ ]]; then
+                    discovered_modules+=("${BASH_REMATCH[1]}")
+                fi
+            done <<< "$output"
+            
+            if [[ ${#discovered_modules[@]} -gt 0 ]]; then
+                print_info "Discovered module functions: ${discovered_modules[*]}"
+            fi
+            
+            print_pass "All scripts loaded successfully ($total_functions total functions, $module_functions module functions)"
         else
             print_fail "Not all functions loaded properly"
             rm -f "$test_script"
@@ -313,12 +326,14 @@ run_smoke_tests() {
     test_syntax || true
     test_executability || true
     test_function_loading || true
+    test_module_command_availability || true
     test_dependencies || true
 }
 
 run_full_tests() {
     print_info "Running full test suite (Mac/Linux)..."
     run_smoke_tests
+    test_dynamic_module_discovery || true
     test_platform_detection || true
     test_help_output || true
     run_shellcheck || true

@@ -94,13 +94,17 @@ The dump command can also be run as a standalone script directly from GitHub wit
 
 ### Usage
 
+#### Download and run the script directly:
 ```bash
-# Download and run the dump script directly
-bash <(curl -s https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/heads/main/dump.sh) [options]
-
-# Examples:
 bash <(curl -s https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/heads/main/dump.sh) -A --archive
-bash <(curl -s https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/heads/main/dump.sh) -A --archive -o /tmp/debug --quiet
+```
+
+#### Download and inspect (and run) the script
+```bash
+curl https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/heads/main/dump.sh
+
+chmod +x dump.sh
+./dump.sh -A --archive
 ```
 
 ### Standalone Options

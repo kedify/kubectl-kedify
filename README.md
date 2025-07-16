@@ -96,11 +96,11 @@ The dump command can also be run as a standalone script directly from GitHub wit
 
 ```bash
 # Download and run the dump script directly
-curl -fsSL https://raw.githubusercontent.com/kedify/kubectl-kedify/main/dump.sh | bash -s -- [options]
+bash <(curl -s https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/heads/main/dump.sh) [options]
 
 # Examples:
-curl -fsSL https://raw.githubusercontent.com/kedify/kubectl-kedify/main/dump.sh | bash -s -- -A --archive
-curl -fsSL https://raw.githubusercontent.com/kedify/kubectl-kedify/main/dump.sh | bash -s -- -o /tmp/debug --quiet
+bash <(curl -s https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/heads/main/dump.sh) -A --archive
+bash <(curl -s https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/heads/main/dump.sh) -A --archive --quiet
 ```
 
 ### Standalone Options

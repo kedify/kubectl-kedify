@@ -447,7 +447,7 @@ function dump::__collect_namespace_data() {
         sleep 1  # Brief pause to ensure cleanup is complete
     fi
     
-    # Collect ScaledObjects, HPAs, and ScaledJobs from this namespace
+    # Collect ScaledObjects, HPAs, ScaledJobs, HTTPScaledObjects, and Kedify resources from this namespace
     echo -e "\033[36mCollecting scaling resources...\033[0m"
     
     # ScaledObjects (only if CRD exists)
@@ -560,6 +560,45 @@ function dump::__collect_namespace_data() {
         echo -e "  \033[90m- HTTPScaledObjects CRD not available (HTTP Add-on not installed)\033[0m"
     fi
     
+    # PodResourceProfiles (only if CRD exists)
+    if kubectl get crd podresourceprofiles.keda.kedify.io >/dev/null 2>&1; then
+        local prp_check=$(kubectl get podresourceprofiles -n "$ns" --no-headers 2>/dev/null)
+        if [[ -n "$prp_check" ]]; then
+            kubectl get podresourceprofiles -n "$ns" -o yaml > "${ns_dir}/podresourceprofiles.yaml" 2>/dev/null
+            echo -e "  \033[32m✓ PodResourceProfiles collected\033[0m"
+        else
+            echo -e "  \033[90m- No PodResourceProfiles found\033[0m"
+        fi
+    else
+        echo -e "  \033[90m- PodResourceProfiles CRD not available (Kedify not installed)\033[0m"
+    fi
+    
+    # ScalingGroups (only if CRD exists)
+    if kubectl get crd scalinggroups.keda.kedify.io >/dev/null 2>&1; then
+        local sg_check=$(kubectl get scalinggroups -n "$ns" --no-headers 2>/dev/null)
+        if [[ -n "$sg_check" ]]; then
+            kubectl get scalinggroups -n "$ns" -o yaml > "${ns_dir}/scalinggroups.yaml" 2>/dev/null
+            echo -e "  \033[32m✓ ScalingGroups collected\033[0m"
+        else
+            echo -e "  \033[90m- No ScalingGroups found\033[0m"
+        fi
+    else
+        echo -e "  \033[90m- ScalingGroups CRD not available (Kedify not installed)\033[0m"
+    fi
+    
+    # ScalingPolicies (only if CRD exists)
+    if kubectl get crd scalingpolicies.keda.kedify.io >/dev/null 2>&1; then
+        local sp_check=$(kubectl get scalingpolicies -n "$ns" --no-headers 2>/dev/null)
+        if [[ -n "$sp_check" ]]; then
+            kubectl get scalingpolicies -n "$ns" -o yaml > "${ns_dir}/scalingpolicies.yaml" 2>/dev/null
+            echo -e "  \033[32m✓ ScalingPolicies collected\033[0m"
+        else
+            echo -e "  \033[90m- No ScalingPolicies found\033[0m"
+        fi
+    else
+        echo -e "  \033[90m- ScalingPolicies CRD not available (Kedify not installed)\033[0m"
+    fi
+    
     # If this is the installation namespace, collect all pods and their logs
     if [[ "$is_installation_ns" == "true" ]]; then
         echo -e "\033[36mCollecting installation data...\033[0m"
@@ -594,9 +633,9 @@ function dump::__collect_namespace_data() {
         
         # Collect Kedify resource
         echo -e "  \033[36m- Collecting Kedify resource...\033[0m"
-        if kubectl get crd kedifies.kedify.io >/dev/null 2>&1; then
-            if kubectl get kedify -n "$ns" --no-headers 2>/dev/null | grep -q .; then
-                kubectl get kedify -n "$ns" -o yaml > "${ns_dir}/kedify-resource.yaml" 2>/dev/null
+        if kubectl get crd kedifyconfigurations.install.kedify.io >/dev/null 2>&1; then
+            if kubectl get kedifyconfigurations -n "$ns" --no-headers 2>/dev/null | grep -q .; then
+                kubectl get kedifyconfigurations -n "$ns" -o yaml > "${ns_dir}/kedify-resource.yaml" 2>/dev/null
                 echo -e "    \033[32m✓ Kedify resource collected\033[0m"
             else
                 echo -e "    \033[90m- No Kedify resource found in this namespace\033[0m"
@@ -798,8 +837,8 @@ function dump::cmd() {
     
     # Determine installation namespace (where Kedify/KEDA is installed)
     local installation_ns=""
-    if kubectl get crd kedifies.kedify.io >/dev/null 2>&1 && kubectl get kedify -A > /dev/null 2>&1; then
-        installation_ns=$(kubectl get kedify -A -o json | jq -r '.items[0].metadata.namespace')
+    if kubectl get crd kedifyconfigurations.install.kedify.io >/dev/null 2>&1 && kubectl get kedifyconfigurations -A > /dev/null 2>&1; then
+        installation_ns=$(kubectl get kedifyconfigurations -A -o json | jq -r '.items[0].metadata.namespace')
         echo -e "\033[36mDetected Kedify installation in namespace:\033[0m $installation_ns"
     elif kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
         # Try to find KEDA operator deployment

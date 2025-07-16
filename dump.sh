@@ -599,6 +599,72 @@ function dump::__collect_namespace_data() {
         echo -e "  \033[90m- ScalingPolicies CRD not available (Kedify not installed)\033[0m"
     fi
     
+    # Collect Kedify OTel Add-on data if available (can be installed per namespace)
+    echo -e "\033[36mCollecting Kedify OTel Add-on data...\033[0m"
+    
+    # Check for OTel Helm release secrets in this namespace
+    local otel_helm_found=false
+    local otel_patterns=("sh.helm.release.v1.kedify-otel.v*" "sh.helm.release.v1.keda-otel-scaler.v*")
+    for pattern in "${otel_patterns[@]}"; do
+        while IFS= read -r secret_name; do
+            if [[ -n "$secret_name" ]]; then
+                if dump::__extract_helm_release_data "$ns" "$secret_name" "$ns_dir" "helm-"; then
+                    otel_helm_found=true
+                fi
+            fi
+        done < <(kubectl get secrets -n "$ns" -o name 2>/dev/null | grep -E "^secret/${pattern//\*/.*}$" | sed 's|^secret/||' || true)
+    done
+    
+    # Collect OTel scaler service data if keda-otel-scaler service exists
+    if kubectl get service keda-otel-scaler -n "$ns" >/dev/null 2>&1; then
+        echo -e "  \033[36m- Found keda-otel-scaler service, collecting metrics and memstore data...\033[0m"
+        
+        # Set up port forwards for OTel scaler service
+        set +m  # Disable job control to suppress messages
+        local otel_pids=()
+        
+        # Port forward for metrics (8080)
+        kubectl port-forward -n "$ns" svc/keda-otel-scaler 8080:8080 >/dev/null 2>&1 &
+        local metrics_pid=$!
+        otel_pids+=("$metrics_pid")
+        
+        # Port forward for memstore data (9090)
+        kubectl port-forward -n "$ns" svc/keda-otel-scaler 9090:9090 >/dev/null 2>&1 &
+        local memstore_pid=$!
+        otel_pids+=("$memstore_pid")
+        
+        # Wait a moment for port forwards to be ready
+        sleep 3
+        
+        # Collect metrics
+        if curl -s --max-time 10 "http://localhost:8080/metrics" -o "${ns_dir}/kedify-otel-scaler-metrics.txt" 2>/dev/null; then
+            echo -e "    \033[32m✓ OTel scaler metrics collected\033[0m"
+        else
+            echo -e "    \033[31m✗ Failed to collect OTel scaler metrics\033[0m"
+        fi
+        
+        # Collect memstore data
+        if curl -s --max-time 10 "http://localhost:9090/memstore/data" -o "${ns_dir}/kedify-otel-scaler-memstore.json" 2>/dev/null; then
+            echo -e "    \033[32m✓ OTel scaler memstore data collected\033[0m"
+        else
+            echo -e "    \033[31m✗ Failed to collect OTel scaler memstore data\033[0m"
+        fi
+        
+        # Cleanup OTel port forwards
+        for pid in "${otel_pids[@]}"; do
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        done
+        set -m 2>/dev/null || true  # Re-enable job control
+        
+        echo -e "  \033[32m✓ Kedify OTel Add-on service data collected\033[0m"
+        otel_helm_found=true
+    fi
+    
+    if [[ "$otel_helm_found" == "false" ]]; then
+        echo -e "  \033[90m- No Kedify OTel Add-on found in this namespace\033[0m"
+    fi
+    
     # If this is the installation namespace, collect all pods and their logs
     if [[ "$is_installation_ns" == "true" ]]; then
         echo -e "\033[36mCollecting installation data...\033[0m"
@@ -645,83 +711,24 @@ function dump::__collect_namespace_data() {
         fi
         
         # Collect Helm installation information if available
-        echo -e "  \033[36m- Collecting Helm installation information...\033[0m"
+        echo -e "\033[36mCollecting Helm installation information...\033[0m"
         local helm_secrets_found=false
         
         # Check for kedify-agent Helm release secret
         if kubectl get secret -n "$ns" sh.helm.release.v1.kedify-agent.v1 >/dev/null 2>&1; then
-            echo -e "    \033[36m- Found Kedify Helm release secret...\033[0m"
-            
-            # Extract and decode the Helm release data (double base64-encoded + gzip)
-            local helm_data=$(kubectl get secret -n "$ns" sh.helm.release.v1.kedify-agent.v1 -o jsonpath='{.data.release}' 2>/dev/null)
-            if [[ -n "$helm_data" ]]; then
-                # Decode base64 twice and decompress (Helm uses double base64 encoding + gzip compression)
-                local temp_release=$(mktemp)
-                if echo "$helm_data" | base64 -d | base64 -d | gunzip 2>/dev/null > "$temp_release"; then
-                    # Extract values from the release data and convert to YAML
-                    if jq -r '.chart.values // empty' "$temp_release" 2>/dev/null | yq -P > "${ns_dir}/helm-kedify-agent-values.yaml" 2>/dev/null && [[ -s "${ns_dir}/helm-kedify-agent-values.yaml" ]]; then
-                        echo -e "      \033[32m✓ Kedify Helm values extracted\033[0m"
-                    else
-                        rm -f "${ns_dir}/helm-kedify-agent-values.yaml"
-                        echo -e "      \033[90m- No Helm values found in release data\033[0m"
-                    fi
-                    
-                    # Extract version information
-                    local chart_version=$(jq -r '.chart.metadata.version // empty' "$temp_release" 2>/dev/null)
-                    local app_version=$(jq -r '.chart.metadata.appVersion // empty' "$temp_release" 2>/dev/null)
-                    local release_version=$(jq -r '.version // empty' "$temp_release" 2>/dev/null)
-                    
-                    if [[ -n "$chart_version" || -n "$app_version" || -n "$release_version" ]]; then
-                        {
-                            echo "# Kedify Helm Installation Information"
-                            echo "# Generated: $(date)"
-                            echo ""
-                            [[ -n "$chart_version" ]] && echo "Chart Version: $chart_version"
-                            [[ -n "$app_version" ]] && echo "App Version: $app_version"
-                            [[ -n "$release_version" ]] && echo "Release Version: $release_version"
-                            echo ""
-                            echo "# For complete values, see: helm-kedify-agent-values.yaml"
-                        } > "${ns_dir}/helm-kedify-agent-info.txt"
-                        echo -e "      \033[32m✓ Kedify Helm version information extracted\033[0m"
-                    fi
-                    
-                    # Clean up temp file
-                    rm -f "$temp_release"
-                    helm_secrets_found=true
-                else
-                    rm -f "$temp_release"
-                    echo -e "      \033[31m✗ Failed to decode Helm release data\033[0m"
-                fi
-            else
-                echo -e "      \033[31m✗ Failed to extract Helm release data from secret\033[0m"
+            if dump::__extract_helm_release_data "$ns" "sh.helm.release.v1.kedify-agent.v1" "$ns_dir" "helm-kedify-agent-"; then
+                helm_secrets_found=true
             fi
         fi
         
-        # Check for other common Helm release secrets (keda, keda-add-ons-http, keda-otel-scaler, etc.)
-        local helm_release_patterns=("sh.helm.release.v1.keda.v*" "sh.helm.release.v1.keda-add-ons-http.v*" "sh.helm.release.v1.kedify.v*" "sh.helm.release.v1.keda-otel-scaler.v*")
+        # Check for other common Helm release secrets (keda, keda-add-ons-http, kedify, etc.)
+        # Note: OTel patterns (kedify-otel, keda-otel-scaler) are excluded to prevent duplication with per-namespace collection
+        local helm_release_patterns=("sh.helm.release.v1.keda.v*" "sh.helm.release.v1.keda-add-ons-http.v*" "sh.helm.release.v1.kedify.v*")
         for pattern in "${helm_release_patterns[@]}"; do
             while IFS= read -r secret_name; do
                 if [[ -n "$secret_name" && "$secret_name" != "sh.helm.release.v1.kedify-agent.v1" ]]; then
-                    echo -e "    \033[36m- Found additional Helm release secret: $secret_name\033[0m"
-                    
-                    local helm_data=$(kubectl get secret -n "$ns" "$secret_name" -o jsonpath='{.data.release}' 2>/dev/null)
-                    if [[ -n "$helm_data" ]]; then
-                        local safe_name=$(echo "$secret_name" | tr '.' '_')
-                        local temp_release=$(mktemp)
-                        if echo "$helm_data" | base64 -d | base64 -d | gunzip 2>/dev/null > "$temp_release"; then
-                            # Extract values and convert to YAML
-                            if jq -r '.chart.values // empty' "$temp_release" 2>/dev/null | yq -P > "${ns_dir}/helm-${safe_name}-values.yaml" 2>/dev/null && [[ -s "${ns_dir}/helm-${safe_name}-values.yaml" ]]; then
-                                echo -e "      \033[32m✓ Helm values extracted for $secret_name\033[0m"
-                            else
-                                rm -f "${ns_dir}/helm-${safe_name}-values.yaml"
-                            fi
-                            
-                            # Clean up temp file
-                            rm -f "$temp_release"
-                            helm_secrets_found=true
-                        else
-                            rm -f "$temp_release"
-                        fi
+                    if dump::__extract_helm_release_data "$ns" "$secret_name" "$ns_dir" "helm-"; then
+                        helm_secrets_found=true
                     fi
                 fi
             done < <(kubectl get secrets -n "$ns" -o name 2>/dev/null | grep -E "^secret/${pattern//\*/.*}$" | sed 's|^secret/||' || true)
@@ -745,56 +752,6 @@ function dump::__collect_namespace_data() {
             dump::__collect_http_addon_queue_data "$ns" "$ns_dir" "json" "individual" "http-addon-queue.json" "Failed to collect JSON queue data"
             
             echo -e "    \033[32m✓ HTTP Add-on queue data collected\033[0m"
-        fi
-        
-        # Collect Kedify OTel Add-on service data if available
-        echo -e "  \033[36m- Collecting Kedify OTel Add-on service data...\033[0m"
-        
-        # Collect OTel scaler metrics and memstore data if keda-otel-scaler service exists
-        if kubectl get service keda-otel-scaler -n "$ns" >/dev/null 2>&1; then
-            echo -e "    \033[36m- Found keda-otel-scaler service, collecting metrics and memstore data...\033[0m"
-            
-            # Set up port forwards for OTel scaler service
-            set +m  # Disable job control to suppress messages
-            local otel_pids=()
-            
-            # Port forward for metrics (8080)
-            kubectl port-forward -n "$ns" svc/keda-otel-scaler 8080:8080 >/dev/null 2>&1 &
-            local metrics_pid=$!
-            otel_pids+=("$metrics_pid")
-            
-            # Port forward for memstore data (9090)
-            kubectl port-forward -n "$ns" svc/keda-otel-scaler 9090:9090 >/dev/null 2>&1 &
-            local memstore_pid=$!
-            otel_pids+=("$memstore_pid")
-            
-            # Wait a moment for port forwards to be ready
-            sleep 3
-            
-            # Collect metrics
-            if curl -s --max-time 10 "http://localhost:8080/metrics" -o "${ns_dir}/kedify-otel-scaler-metrics.txt" 2>/dev/null; then
-                echo -e "      \033[32m✓ OTel scaler metrics collected\033[0m"
-            else
-                echo -e "      \033[31m✗ Failed to collect OTel scaler metrics\033[0m"
-            fi
-            
-            # Collect memstore data
-            if curl -s --max-time 10 "http://localhost:9090/memstore/data" -o "${ns_dir}/kedify-otel-scaler-memstore.json" 2>/dev/null; then
-                echo -e "      \033[32m✓ OTel scaler memstore data collected\033[0m"
-            else
-                echo -e "      \033[31m✗ Failed to collect OTel scaler memstore data\033[0m"
-            fi
-            
-            # Cleanup OTel port forwards
-            for pid in "${otel_pids[@]}"; do
-                kill "$pid" 2>/dev/null || true
-                wait "$pid" 2>/dev/null || true
-            done
-            set -m 2>/dev/null || true  # Re-enable job control
-            
-            echo -e "    \033[32m✓ Kedify OTel Add-on service data collected\033[0m"
-        else
-            echo -e "    \033[90m- No keda-otel-scaler service found (Kedify OTel Add-on not installed)\033[0m"
         fi
     fi
     
@@ -1541,5 +1498,60 @@ function dump::__generate_cluster_health_summary() {
     else
         echo "  - Resource utilization data unavailable (metrics-server not available)" >> "$summary_file"
         echo "" >> "$summary_file"
+    fi
+}
+
+function dump::__extract_helm_release_data() {
+    local ns="$1"
+    local secret_name="$2"
+    local output_dir="$3"
+    local file_prefix="$4"  # Optional prefix for output files (e.g., "helm-" or "")
+    
+    echo -e "  \033[36m- Found Helm release secret: $secret_name\033[0m"
+    
+    local helm_data=$(kubectl get secret -n "$ns" "$secret_name" -o jsonpath='{.data.release}' 2>/dev/null)
+    if [[ -n "$helm_data" ]]; then
+        local safe_name=$(echo "$secret_name" | tr '.' '_')
+        local temp_release=$(mktemp)
+        
+        if echo "$helm_data" | base64 -d | base64 -d | gunzip 2>/dev/null > "$temp_release"; then
+            # Extract values and convert to YAML
+            if jq -r '.chart.values // empty' "$temp_release" 2>/dev/null | yq -P > "${output_dir}/${file_prefix}${safe_name}-values.yaml" 2>/dev/null && [[ -s "${output_dir}/${file_prefix}${safe_name}-values.yaml" ]]; then
+                echo -e "    \033[32m✓ Helm values extracted for $secret_name\033[0m"
+            else
+                rm -f "${output_dir}/${file_prefix}${safe_name}-values.yaml"
+                echo -e "    \033[90m- No Helm values found in release data for $secret_name\033[0m"
+            fi
+            
+            # Extract version information
+            local chart_version=$(jq -r '.chart.metadata.version // empty' "$temp_release" 2>/dev/null)
+            local app_version=$(jq -r '.chart.metadata.appVersion // empty' "$temp_release" 2>/dev/null)
+            local release_version=$(jq -r '.version // empty' "$temp_release" 2>/dev/null)
+            
+            if [[ -n "$chart_version" || -n "$app_version" || -n "$release_version" ]]; then
+                {
+                    echo "# Helm Installation Information for $secret_name"
+                    echo "# Generated: $(date)"
+                    echo ""
+                    [[ -n "$chart_version" ]] && echo "Chart Version: $chart_version"
+                    [[ -n "$app_version" ]] && echo "App Version: $app_version"
+                    [[ -n "$release_version" ]] && echo "Release Version: $release_version"
+                    echo ""
+                    echo "# For complete values, see: ${file_prefix}${safe_name}-values.yaml"
+                } > "${output_dir}/${file_prefix}${safe_name}-info.txt"
+                echo -e "    \033[32m✓ Helm version information extracted for $secret_name\033[0m"
+            fi
+            
+            # Clean up temp file
+            rm -f "$temp_release"
+            return 0  # Success
+        else
+            rm -f "$temp_release"
+            echo -e "    \033[31m✗ Failed to decode Helm release data for $secret_name\033[0m"
+            return 1  # Failure
+        fi
+    else
+        echo -e "    \033[31m✗ Failed to extract Helm release data from secret $secret_name\033[0m"
+        return 1  # Failure
     fi
 }

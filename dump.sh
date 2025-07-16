@@ -697,8 +697,8 @@ function dump::__collect_namespace_data() {
             fi
         fi
         
-        # Check for other common Helm release secrets (keda, keda-add-ons-http, etc.)
-        local helm_release_patterns=("sh.helm.release.v1.keda.v*" "sh.helm.release.v1.keda-add-ons-http.v*" "sh.helm.release.v1.kedify.v*")
+        # Check for other common Helm release secrets (keda, keda-add-ons-http, keda-otel-scaler, etc.)
+        local helm_release_patterns=("sh.helm.release.v1.keda.v*" "sh.helm.release.v1.keda-add-ons-http.v*" "sh.helm.release.v1.kedify.v*" "sh.helm.release.v1.keda-otel-scaler.v*")
         for pattern in "${helm_release_patterns[@]}"; do
             while IFS= read -r secret_name; do
                 if [[ -n "$secret_name" && "$secret_name" != "sh.helm.release.v1.kedify-agent.v1" ]]; then
@@ -745,6 +745,56 @@ function dump::__collect_namespace_data() {
             dump::__collect_http_addon_queue_data "$ns" "$ns_dir" "json" "individual" "http-addon-queue.json" "Failed to collect JSON queue data"
             
             echo -e "    \033[32m✓ HTTP Add-on queue data collected\033[0m"
+        fi
+        
+        # Collect Kedify OTel Add-on service data if available
+        echo -e "  \033[36m- Collecting Kedify OTel Add-on service data...\033[0m"
+        
+        # Collect OTel scaler metrics and memstore data if keda-otel-scaler service exists
+        if kubectl get service keda-otel-scaler -n "$ns" >/dev/null 2>&1; then
+            echo -e "    \033[36m- Found keda-otel-scaler service, collecting metrics and memstore data...\033[0m"
+            
+            # Set up port forwards for OTel scaler service
+            set +m  # Disable job control to suppress messages
+            local otel_pids=()
+            
+            # Port forward for metrics (8080)
+            kubectl port-forward -n "$ns" svc/keda-otel-scaler 8080:8080 >/dev/null 2>&1 &
+            local metrics_pid=$!
+            otel_pids+=("$metrics_pid")
+            
+            # Port forward for memstore data (9090)
+            kubectl port-forward -n "$ns" svc/keda-otel-scaler 9090:9090 >/dev/null 2>&1 &
+            local memstore_pid=$!
+            otel_pids+=("$memstore_pid")
+            
+            # Wait a moment for port forwards to be ready
+            sleep 3
+            
+            # Collect metrics
+            if curl -s --max-time 10 "http://localhost:8080/metrics" -o "${ns_dir}/kedify-otel-scaler-metrics.txt" 2>/dev/null; then
+                echo -e "      \033[32m✓ OTel scaler metrics collected\033[0m"
+            else
+                echo -e "      \033[31m✗ Failed to collect OTel scaler metrics\033[0m"
+            fi
+            
+            # Collect memstore data
+            if curl -s --max-time 10 "http://localhost:9090/memstore/data" -o "${ns_dir}/kedify-otel-scaler-memstore.json" 2>/dev/null; then
+                echo -e "      \033[32m✓ OTel scaler memstore data collected\033[0m"
+            else
+                echo -e "      \033[31m✗ Failed to collect OTel scaler memstore data\033[0m"
+            fi
+            
+            # Cleanup OTel port forwards
+            for pid in "${otel_pids[@]}"; do
+                kill "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+            done
+            set -m 2>/dev/null || true  # Re-enable job control
+            
+            echo -e "    \033[32m✓ Kedify OTel Add-on service data collected\033[0m"
+        else
+            echo -e "    \033[90m- No keda-otel-scaler service found (Kedify OTel Add-on not installed)\033[0m"
         fi
     fi
     

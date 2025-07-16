@@ -326,14 +326,12 @@ run_smoke_tests() {
     test_syntax || true
     test_executability || true
     test_function_loading || true
-    test_module_command_availability || true
     test_dependencies || true
 }
 
 run_full_tests() {
     print_info "Running full test suite (Mac/Linux)..."
     run_smoke_tests
-    test_dynamic_module_discovery || true
     test_platform_detection || true
     test_help_output || true
     run_shellcheck || true

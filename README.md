@@ -100,7 +100,7 @@ bash <(curl -s https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/head
 
 # Examples:
 bash <(curl -s https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/heads/main/dump.sh) -A --archive
-bash <(curl -s https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/heads/main/dump.sh) -A --archive --quiet
+bash <(curl -s https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/heads/main/dump.sh) -A --archive -o /tmp/debug --quiet
 ```
 
 ### Standalone Options

@@ -101,7 +101,7 @@ bash <(curl -s https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/head
 
 #### Download and inspect (and run) the script
 ```bash
-curl https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/heads/main/dump.sh
+curl -s https://raw.githubusercontent.com/kedify/kubectl-kedify/refs/heads/main/dump.sh > dump.sh
 
 chmod +x dump.sh
 ./dump.sh -A --archive

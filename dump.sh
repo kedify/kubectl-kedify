@@ -97,6 +97,81 @@ function dump::__wait_for_port_forwards() {
     done
 }
 
+function dump::__aggregate_interceptor_queue() {
+    local output_format="$1"
+    local mode="$2"
+
+    local cmd=""
+    case $output_format in
+        json)
+            cmd="jq '.'"
+            ;;
+        yaml)
+            cmd="yq e -P"
+            ;;
+        *)
+            cmd="$(dump::__addon_queue_structured_output $mode) | column -t -s $'\t'"
+            ;;            
+    esac
+    jq -n --arg mode "$mode" '
+      if $mode == "aggregated" then
+        # Aggregate all queues (original behavior)
+        reduce inputs as $in ({};
+          reduce ($in.queue | to_entries[]) as $entry (.;
+            .[$entry.key] as $existing |
+            if $existing then
+              .[$entry.key] = (
+                $existing |
+                with_entries(
+                  .value as $v |
+                  $entry.value[.key] as $new_val |
+                  if $new_val then
+                    .value = ($v + $new_val)
+                  else
+                    .
+                  end
+                )
+              )
+            else
+              .[$entry.key] = $entry.value
+            end
+          )
+        )
+      else
+        # Individual mode: preserve pod names
+        [inputs | {pod: .name, queue: .queue}]
+      end
+    ' | eval "$cmd"
+}
+
+function dump::__addon_queue_structured_output() {
+    local mode="$1"
+    if [ "$mode" = "individual" ]; then
+        cat <<'EOF'
+jq -r '
+(["POD", "TARGET", "CONCURRENCY", "RPS"],
+ (.[] | [
+    .pod,
+    (.queue | keys[0]),
+    .queue[.queue | keys[0]].Concurrency,
+    .queue[.queue | keys[0]].RPS
+ ]))
+ | @tsv'
+EOF
+    else
+        cat <<'EOF'
+jq -r '
+(["TARGET", "CONCURRENCY", "RPS"],
+ (to_entries[] | [
+    .key,
+    .value.Concurrency,
+    .value.RPS
+ ]))
+ | @tsv'
+EOF
+    fi
+}
+
 function dump::__collect_http_addon_queue_data() {
     local ns="$1"
     local ns_dir="$2"
@@ -105,19 +180,179 @@ function dump::__collect_http_addon_queue_data() {
     local output_file="$5"
     local error_msg="$6"
     
-    # Collect HTTP addon queue data from interceptor pods
-    {
-        echo "# HTTP Add-on Queue Data (mode: $mode, format: $output_format)"
-        echo "# Collected at: $(date)"
-        echo ""
+    # If no output_file is provided, output to stdout (for debug command)
+    local output_to_file=false
+    if [[ -n "$output_file" ]]; then
+        output_to_file=true
+    fi
+    
+    # Array to track port-forward PIDs for cleanup
+    local pids=()
+    
+    # Set up trap to cleanup port-forwards if interrupted
+    trap 'if [[ ${#pids[@]} -gt 0 ]]; then dump::__cleanup_port_forwards "${pids[@]}"; fi' INT TERM EXIT
+    
+    # Collect HTTP addon queue data from interceptor pods using port forwarding
+    local function_output=""
+    function_output=$(
+        # Only show headers and messages for dump command (when output_to_file is true)
+        if [[ "$output_to_file" == "true" ]]; then
+            if [[ "$output_format" == "json" ]]; then
+                # For JSON format, just output the data without headers
+                :
+            else
+                echo "# HTTP Add-on Queue Data (mode: $mode, format: $output_format)"
+                echo "# Collected at: $(date)"
+                echo ""
+            fi
+        fi
         
-        kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" -o json 2>/dev/null | \
-        jq -r '.items[].metadata.name' | while read -r pod; do
-            echo "## Pod: $pod"
-            kubectl get --raw "/api/v1/namespaces/$ns/pods/$pod/proxy/queue" 2>/dev/null || echo "Failed to get queue data from $pod"
-            echo ""
-        done
-    } > "${ns_dir}/${output_file}" 2>/dev/null || echo -e "    \033[31m${error_msg}\033[0m"
+        # Get interceptor pods
+        local interceptor_pods
+        IFS=$'\n' read -d '' -r -a interceptor_pods < <(kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' && printf '\0')
+        
+        if [[ ${#interceptor_pods[@]} -gt 0 ]]; then
+            # Set up port forwards for interceptor pods (they typically expose metrics on port 9090)
+            set +m  # Disable job control to suppress messages
+            local local_port=9090
+            local forward_ports=()
+            
+            for pod in "${interceptor_pods[@]}"; do
+                local_port=$((local_port + 1))
+                # Try common HTTP add-on interceptor ports: 9090 (metrics), 8080 (main), 9091 (admin)
+                local pod_ports=$(kubectl get pod -n "$ns" "$pod" -o jsonpath='{.spec.containers[*].ports[*].containerPort}' 2>/dev/null)
+                local target_port=""
+                
+                # Check if pod has port 9090 (metrics/queue endpoint)
+                if echo "$pod_ports" | grep -q "9090"; then
+                    target_port="9090"
+                elif echo "$pod_ports" | grep -q "8080"; then
+                    target_port="8080"
+                elif echo "$pod_ports" | grep -q "9091"; then
+                    target_port="9091"
+                else
+                    # Default to 9090 if we can't determine the port
+                    target_port="9090"
+                fi
+                
+                kubectl port-forward -n "$ns" "$pod" "$local_port:$target_port" >/dev/null 2>&1 &
+                pids+=($!)
+                forward_ports+=("$local_port")
+            done
+            
+            # Wait for port forwards to be ready
+            if [[ "$output_to_file" == "true" && "$output_format" != "json" ]]; then
+                echo "# Waiting for port-forwards to interceptor pods..."
+            fi
+            local max_wait=30
+            for port in "${forward_ports[@]}"; do
+                local ready=false
+                local port_wait=0
+                while [[ $port_wait -lt $max_wait ]] && [[ "$ready" == "false" ]]; do
+                    # Try different endpoints that might be available
+                    if curl -s --max-time 1 --connect-timeout 1 "http://localhost:${port}/queue" >/dev/null 2>&1 || \
+                       curl -s --max-time 1 --connect-timeout 1 "http://localhost:${port}/metrics" >/dev/null 2>&1 || \
+                       curl -s --max-time 1 --connect-timeout 1 "http://localhost:${port}/" >/dev/null 2>&1; then
+                        ready=true
+                    else
+                        sleep 0.5
+                        port_wait=$((port_wait + 1))
+                    fi
+                done
+                
+                if [[ "$ready" == "false" && "$output_to_file" == "true" && "$output_format" != "json" ]]; then
+                    echo "# Warning: Port $port not ready after ${max_wait}s, proceeding anyway"
+                fi
+            done
+            
+            # Collect queue data and format it properly
+            local queue_json_data=""
+            local_port=9090
+            for pod in "${interceptor_pods[@]}"; do
+                local_port=$((local_port + 1))
+                
+                # Try to get queue data from different possible endpoints
+                local queue_data=""
+                for endpoint in "/queue" "/api/v1/queue" "/metrics" ""; do
+                    if queue_data=$(curl -s --max-time 5 "http://localhost:${local_port}${endpoint}" 2>/dev/null); then
+                        if [[ -n "$queue_data" ]]; then
+                            # If we got data from /metrics, try to filter for queue-related metrics
+                            if [[ "$endpoint" == "/metrics" ]]; then
+                                # Try to parse queue metrics from prometheus format
+                                # This is a fallback - queue endpoint is preferred
+                                continue
+                            else
+                                # We got queue data, format it as JSON for processing
+                                queue_json_data+=$(echo "$queue_data" | jq -r '. | {name: "'$pod'", queue: .}')$'\n'
+                                break
+                            fi
+                        fi
+                    fi
+                done
+                
+                if [[ -z "$queue_data" && "$output_to_file" == "true" && "$output_format" != "json" ]]; then
+                    echo "# Failed to get queue data from $pod (tried endpoints: /queue, /api/v1/queue, /metrics, /)"
+                fi
+            done
+            
+            # Process and format the collected data
+            if [[ -n "$queue_json_data" ]]; then
+                echo "$queue_json_data" | dump::__aggregate_interceptor_queue "$output_format" "$mode"
+            else
+                if [[ "$output_format" == "json" ]]; then
+                    if [[ "$mode" == "individual" ]]; then
+                        echo "[]"
+                    else
+                        echo "{}"
+                    fi
+                else
+                    if [[ "$output_to_file" == "true" ]]; then
+                        echo "# No queue data could be retrieved from interceptor pods"
+                    else
+                        # For debug command, output appropriate empty result
+                        if [[ "$output_format" == "json" ]]; then
+                            if [[ "$mode" == "individual" ]]; then
+                                echo "[]"
+                            else
+                                echo "{}"
+                            fi
+                        else
+                            echo "No queue data available"
+                        fi
+                    fi
+                fi
+            fi
+            
+            # Cleanup port forwards
+            dump::__cleanup_port_forwards "${pids[@]}"
+            pids=()
+            set -m 2>/dev/null || true  # Re-enable job control
+        else
+            if [[ "$output_format" == "json" ]]; then
+                if [[ "$mode" == "individual" ]]; then
+                    echo "[]"
+                else
+                    echo "{}"
+                fi
+            else
+                if [[ "$output_to_file" == "true" ]]; then
+                    echo "# No HTTP Add-on interceptor pods found in namespace $ns"
+                else
+                    echo "No HTTP Add-on interceptor pods found"
+                fi
+            fi
+        fi
+    )
+    
+    # Output to file or stdout based on whether output_file was provided
+    if [[ "$output_to_file" == "true" ]]; then
+        echo "$function_output" > "${ns_dir}/${output_file}" 2>/dev/null || echo -e "    \033[31m${error_msg}\033[0m"
+    else
+        echo "$function_output"
+    fi
+    
+    # Clear the trap as we're ending the function normally
+    trap - INT TERM EXIT
 }
 
 function dump::__collect_namespace_data() {
@@ -374,13 +609,13 @@ function dump::__collect_namespace_data() {
         if kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" > /dev/null 2>&1; then
             echo -e "  \033[36m- Collecting HTTP Add-on queue data...\033[0m"
             
-            # Individual queue data (per pod)
+            # Individual queue data (per pod) - formatted as table
             dump::__collect_http_addon_queue_data "$ns" "$ns_dir" "" "individual" "http-addon-queue-individual.txt" "Failed to collect individual queue data"
             
-            # Aggregated queue data
+            # Aggregated queue data - formatted as table
             dump::__collect_http_addon_queue_data "$ns" "$ns_dir" "" "aggregated" "http-addon-queue-aggregated.txt" "Failed to collect aggregated queue data"
             
-            # JSON format for programmatic access
+            # JSON format for programmatic access - individual mode
             dump::__collect_http_addon_queue_data "$ns" "$ns_dir" "json" "individual" "http-addon-queue.json" "Failed to collect JSON queue data"
             
             echo -e "    \033[32m✓ HTTP Add-on queue data collected\033[0m"

@@ -1568,3 +1568,8 @@ function dump::__extract_helm_release_data() {
         return 1  # Failure
     fi
 }
+
+# Execute dump::cmd when script is run directly (not sourced)
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    dump::cmd "$@"
+fi

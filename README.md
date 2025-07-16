@@ -118,6 +118,38 @@ apt-get install bat curl figlet fzf jq
 
 and for `yq` consult the [readme](https://github.com/mikefarah/yq#install).
 
+## Running Dump Script Standalone
+
+The dump command can also be run as a standalone script directly from GitHub without installing the kubectl plugin. This is useful for quick diagnostics or in environments where kubectl plugins cannot be installed.
+
+### Usage
+
+```bash
+# Download and run the dump script directly
+curl -fsSL https://raw.githubusercontent.com/kedify/kubectl-kedify/main/dump.sh | bash -s -- [options]
+
+# Examples:
+curl -fsSL https://raw.githubusercontent.com/kedify/kubectl-kedify/main/dump.sh | bash -s -- -A --archive
+curl -fsSL https://raw.githubusercontent.com/kedify/kubectl-kedify/main/dump.sh | bash -s -- -o /tmp/debug --quiet
+```
+
+### Standalone Options
+
+All the same options available in the kubectl plugin are supported:
+
+- `-o, --output DIR` - Output directory or archive file path
+- `-n, --namespace NS` - Specific namespace (default: current namespace)  
+- `-A, --all-namespaces` - Collect from all namespaces
+- `-q, --quiet` - Quiet mode - suppress all status output for cleaner automation
+- `--archive` - Create tar.gz archive
+
+### Requirements for Standalone Usage
+
+The standalone script requires the same dependencies as the plugin:
+- `kubectl` (configured with cluster access)
+- `curl`, `jq`, `yq` 
+- `tar` and `gzip` (for archive mode)
+
 ## Development and Testing
 
 ### Local Testing

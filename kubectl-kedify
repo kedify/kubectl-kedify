@@ -18,10 +18,12 @@ if [[ "$0" == *"/.krew/store/"* ]] || [[ "$0" == *"/.krew/bin/"* ]]; then
     KEDIFY_VERSION=$(ls "$STORE_PATH" | head -n1)
     DEBUG_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/debug.sh"
     INSIGHTS_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/insights.sh"
+    DUMP_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/dump.sh"
 else
     # Running locally - use local files
     DEBUG_SCRIPT="${DIR}/debug.sh"
     INSIGHTS_SCRIPT="${DIR}/insights.sh"
+    DUMP_SCRIPT="${DIR}/dump.sh"
 fi
 
 # Source debug script if it exists
@@ -36,6 +38,13 @@ if [[ -f "${INSIGHTS_SCRIPT}" ]]; then
     source "${INSIGHTS_SCRIPT}"
 else
     echo "Warning: Insights script not found at ${INSIGHTS_SCRIPT}" >&2
+fi
+
+# Source dump script if it exists
+if [[ -f "${DUMP_SCRIPT}" ]]; then
+    source "${DUMP_SCRIPT}"
+else
+    echo "Warning: Dump script not found at ${DUMP_SCRIPT}" >&2
 fi
 
 main() {
@@ -57,7 +66,8 @@ main() {
         autoscale ; exit 0
     }
     [[ $1 == debug ]] || [[ $1 == dbg ]] && { shift 1 ; debug::cmd $@ ; exit 0; }
-    [[ $1 == insights ]] || [[ $1 == ins ]] && { shift 1 ; insights $@ ; exit 0; }
+    [[ $1 == insights ]] || [[ $1 == ins ]] && { shift 1 ; insights_cmd $@ ; exit 0; }
+    [[ $1 == dump ]] || [[ $1 == dmp ]] && { shift 1 ; dump::cmd $@ ; exit 0; }
     [[ $1 == -v ]] || [[ $1 == --version ]] && { print_version ; exit 0; }
     print_usage
 }
@@ -189,7 +199,7 @@ delete() {
 print_usage() {
     cat << EOF
 
-Usage: kubectl kedify (i)nstall | (d)elete | (s)tatus | (a)utoscale | (dbg)debug | (ins)ights
+Usage: kubectl kedify (i)nstall | (d)elete | (s)tatus | (a)utoscale | (dbg)debug | (ins)ights | (dmp)dump
 
 Available commands:
    install,   i           Installs the Kedify agent
@@ -199,6 +209,7 @@ Available commands:
    autoscale, a           Runs the interactive mode for creating HTTPScaledObject
    debug,     dbg         Provides low level information regarding Kedify components
    insights,  ins         Analyzes ScaledObjects for potential configuration issues
+   dump,      dmp         Collects comprehensive debug information from Kedify/KEDA components
 
    --version, -v          Prints the version
 
@@ -213,6 +224,9 @@ Examples:
    kubectl kedify insights                        ... analyzes ScaledObjects in current namespace
    kubectl kedify ins -A                          ... analyzes ScaledObjects in all namespaces
    kubectl kedify insights -n myapp               ... analyzes ScaledObjects in specific namespace
+   kubectl kedify dump                            ... collects debug info from current namespace
+   kubectl kedify dmp -A --archive                ... collects debug info from all namespaces as tar.gz
+   kubectl kedify dump -o /tmp/debug -n myapp     ... collects debug info from specific namespace
 
 Other env vars that can be passed:
    API                                         ... defaults to https://api.kedify.io

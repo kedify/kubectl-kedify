@@ -238,7 +238,11 @@ insights_analyze() {
     local all_namespaces="$2"
     local kubectl_cmd="$3"
     
-    figlet insights
+    if command -v figlet >/dev/null 2>&1; then
+        figlet insights
+    else
+        echo "INSIGHTS"
+    fi
     
     # Determine scope message
     local scope_msg=""

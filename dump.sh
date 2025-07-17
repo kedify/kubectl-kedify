@@ -438,6 +438,15 @@ function dump::__collect_namespace_data() {
                 fi
                 sleep 1
             done
+            
+            # Envoy clusters information
+            for i in {1..5}; do
+                if curl -s --max-time 5 "http://localhost:${local_port}/clusters?format=json" -o "${ns_dir}/${pod}-clusters.json" 2>/dev/null; then
+                    dump::__print_status "    \033[32m✓ Envoy clusters information collected\033[0m"
+                    break
+                fi
+                sleep 1
+            done
         done
         
         # Collect resource usage for all kedify-proxy pods in this namespace

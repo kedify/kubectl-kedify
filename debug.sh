@@ -88,11 +88,17 @@ EOF
 function debug::__print_usage() {
     cat << EOF
 
-Usage: kubectl kedify debug <command>
+Usage: kubectl kedify debug <command> [options]
 
 Available commands:
   so/scaledobject       Inspect ScaledObject resource
   httpaddon             Verify HTTP Addon setup and current configuration
+
+Options:
+  -o, --output FORMAT   Output format (json, yaml) - for supported commands
+  -i, --individual      Show individual queue sizes per interceptor instead of aggregating
+  -w, --watch           Continuously watch and update every second
+  -h, --help            Show this help message
 
 Examples:
   kubectl kedify debug scaledobject -n default foo     ... inspect ScaledObject resource named 'foo' in the 'default' namespace
@@ -165,6 +171,10 @@ function debug::__httpaddon_cmd() {
             -w|--watch)
                 watch="true"
                 ;;
+            -h|--help)
+                debug::__print_usage
+                exit 0
+                ;;
             *)
                 echo "Unknown flag: $o"
                 echo "" 
@@ -172,6 +182,7 @@ function debug::__httpaddon_cmd() {
                 echo "  -o|--output         ... output format (json, yaml)"
                 echo "  -i|--individual     ... show individual queue sizes per interceptor instead of aggregating"
                 echo "  -w|--watch          ... continuously watch and update every second"
+                echo "  -h|--help           ... show this help message"
                 debug::__print_usage
                 exit 1
                 ;;
@@ -314,6 +325,10 @@ function debug::__scaledobject_cmd() {
                 print_namespace="true"
                 filtered_flags+=("$o")
                 ;;
+            -h|--help)
+                debug::__print_usage
+                exit 0
+                ;;
             *)
                 # Check if it's a flag (starts with -)
                 if [[ "$o" == -* ]]; then
@@ -323,6 +338,8 @@ function debug::__scaledobject_cmd() {
                     echo "  -o|--output         ... output format (json, yaml, wide)"
                     echo "  -w|--watch          ... continuously watch and update every second"
                     echo "  -A|--all-namespaces ... list resources from all namespaces"
+                    echo ""
+                    echo "  -h|--help           ... show this help message"
                     debug::__print_usage
                     exit 1
                 else

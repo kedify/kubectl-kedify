@@ -10,7 +10,7 @@ insights_problem_resources_count=0
 insights_total_problems_count=0
 
 # Helper function to add problems
-insights_add_problem() {
+function insights::__add_problem() {
     local resource_key="$1"
     local message="$2"
     
@@ -34,7 +34,7 @@ insights_add_problem() {
 }
 
 # Check for polling interval issues when minReplicaCount > 0
-insights_check_polling_interval_with_min_replicas() {
+function insights::__check_polling_interval_with_min_replicas() {
     local so_json="$1"
     local so_name="$2"
     local so_namespace="$3"
@@ -71,16 +71,16 @@ insights_check_polling_interval_with_min_replicas() {
         
         if [[ "$idle_replicas" == "null" && "$polling_interval" != "30" ]] || [[ "$idle_replicas" != "null" && "$idle_replicas" != "0" && "$polling_interval" != "30" ]]; then
             # pollingInterval is set to non-default value but minReplicas > 0
-            insights_add_problem "$resource_name" "pollingInterval (${polling_interval}s) has no effect when minReplicaCount > 0. Consider removing pollingInterval setting."
+            insights::__add_problem "$resource_name" "pollingInterval (${polling_interval}s) has no effect when minReplicaCount > 0. Consider removing pollingInterval setting."
         elif [[ "$polling_interval" == "30" && "$idle_replicas" != "0" ]]; then
             # pollingInterval is default but minReplicas > 0 and not the special case
-            insights_add_problem "$resource_name" "pollingInterval has no effect when minReplicaCount > 0. Consider removing pollingInterval setting."
+            insights::__add_problem "$resource_name" "pollingInterval has no effect when minReplicaCount > 0. Consider removing pollingInterval setting."
         fi
     fi
 }
 
 # Check for low polling interval values
-insights_check_low_polling_interval() {
+function insights::__check_low_polling_interval() {
     local so_json="$1"
     local so_name="$2"
     local so_namespace="$3"
@@ -97,12 +97,12 @@ insights_check_low_polling_interval() {
             resource_name="${so_name}"
         fi
         
-        insights_add_problem "$resource_name" "pollingInterval (${polling_interval}s) is set to a very low value. Be careful as this might overload your services."
+        insights::__add_problem "$resource_name" "pollingInterval (${polling_interval}s) is set to a very low value. Be careful as this might overload your services."
     fi
 }
 
 # Check for missing fallback configuration
-insights_check_missing_fallback() {
+function insights::__check_missing_fallback() {
     local so_json="$1"
     local so_name="$2"
     local so_namespace="$3"
@@ -147,12 +147,12 @@ insights_check_missing_fallback() {
             resource_name="${so_name}"
         fi
         
-        insights_add_problem "$resource_name" "No fallback configuration specified. Consider adding a fallback section to handle scaler failures gracefully."
+        insights::__add_problem "$resource_name" "No fallback configuration specified. Consider adding a fallback section to handle scaler failures gracefully."
     fi
 }
 
 # Help function for insights command
-insights_print_help() {
+function insights::__print_help() {
     cat << EOF
 
 Usage: kubectl kedify insights [-n namespace] [-A|--all-namespaces]
@@ -178,7 +178,7 @@ EOF
 }
 
 # Main insights command handler
-insights_cmd() {
+function insights::cmd() {
     local namespace=""
     local all_namespaces=false
     
@@ -189,7 +189,7 @@ insights_cmd() {
                 if [[ $# -lt 2 ]]; then
                     echo "Error: -n|--namespace requires a value"
                     echo ""
-                    insights_print_help
+                    insights::__print_help
                     exit 1
                 fi
                 namespace="$2"
@@ -200,13 +200,13 @@ insights_cmd() {
                 shift
                 ;;
             -h|--help)
-                insights_print_help
+                insights::__print_help
                 exit 0
                 ;;
             *)
                 echo "Unknown option: $1"
                 echo ""
-                insights_print_help
+                insights::__print_help
                 exit 1
                 ;;
         esac
@@ -229,11 +229,11 @@ insights_cmd() {
     kubectl_cmd="$kubectl_cmd -o json"
     
     # Call the analyze function
-    insights_analyze "$namespace" "$all_namespaces" "$kubectl_cmd"
+    insights::__analyze "$namespace" "$all_namespaces" "$kubectl_cmd"
 }
 
 # Main analysis function
-insights_analyze() {
+function insights::__analyze() {
     local namespace="$1"
     local all_namespaces="$2"
     local kubectl_cmd="$3"
@@ -287,9 +287,9 @@ insights_analyze() {
         local so_namespace=$(echo "$so_json" | jq -r '.metadata.namespace')
         
         # Run all checks
-        insights_check_polling_interval_with_min_replicas "$so_json" "$so_name" "$so_namespace" "$all_namespaces"
-        insights_check_low_polling_interval "$so_json" "$so_name" "$so_namespace" "$all_namespaces"
-        insights_check_missing_fallback "$so_json" "$so_name" "$so_namespace" "$all_namespaces"
+        insights::__check_polling_interval_with_min_replicas "$so_json" "$so_name" "$so_namespace" "$all_namespaces"
+        insights::__check_low_polling_interval "$so_json" "$so_name" "$so_namespace" "$all_namespaces"
+        insights::__check_missing_fallback "$so_json" "$so_name" "$so_namespace" "$all_namespaces"
         
         # Show progress
         analyzed_count=$((analyzed_count+1))

@@ -66,7 +66,7 @@ main() {
         autoscale ; exit 0
     }
     [[ $1 == debug ]] || [[ $1 == dbg ]] && { shift 1 ; debug::cmd $@ ; exit 0; }
-    [[ $1 == insights ]] || [[ $1 == ins ]] && { shift 1 ; insights_cmd $@ ; exit 0; }
+    [[ $1 == insights ]] || [[ $1 == ins ]] && { shift 1 ; insights::cmd $@ ; exit 0; }
     [[ $1 == dump ]] || [[ $1 == dmp ]] && { shift 1 ; dump::cmd $@ ; exit 0; }
     [[ $1 == -v ]] || [[ $1 == --version ]] && { print_version ; exit 0; }
     print_usage
@@ -179,7 +179,7 @@ logs() {
 
 insights() {
     # Delegate to insights module
-    insights_cmd "$@"
+    insights::cmd "$@"
 }
 
 delete() {

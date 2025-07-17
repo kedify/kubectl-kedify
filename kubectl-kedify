@@ -69,6 +69,7 @@ main() {
     [[ $1 == insights ]] || [[ $1 == ins ]] && { shift 1 ; insights::cmd $@ ; exit 0; }
     [[ $1 == dump ]] || [[ $1 == dmp ]] && { shift 1 ; dump::cmd $@ ; exit 0; }
     [[ $1 == -v ]] || [[ $1 == --version ]] && { print_version ; exit 0; }
+    [[ $1 == -h ]] || [[ $1 == --help ]] && { print_usage ; exit 0; }
     print_usage
 }
 
@@ -199,7 +200,7 @@ delete() {
 print_usage() {
     cat << EOF
 
-Usage: kubectl kedify (i)nstall | (d)elete | (s)tatus | (a)utoscale | (dbg)debug | (ins)ights | (dmp)dump
+Usage: kubectl kedify (i)nstall | (d)elete | (s)tatus | (a)utoscale | (dbg)debug | (ins)ights | (dmp)dump | (h)elp
 
 Available commands:
    install,   i           Installs the Kedify agent
@@ -212,6 +213,7 @@ Available commands:
    dump,      dmp         Collects comprehensive debug information from Kedify/KEDA components
 
    --version, -v          Prints the version
+   --help,    -h          Shows this help message
 
 Examples:
    kubectl kedify install                         ... installs the Kedify agent in interactive mode

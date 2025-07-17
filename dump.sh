@@ -36,7 +36,9 @@ Options:
   -n, --namespace NS       Specific namespace (default: current namespace)  
   -A, --all-namespaces     Collect from all namespaces
   -q, --quiet              Quiet mode - suppress all status output
-  --archive                Create tar.gz archive
+  -a, --archive            Create tar.gz archive
+
+  -h, --help               Show this help message
 
 Examples:
   kubectl kedify dump                            ... collect diagnostic info from current namespace
@@ -44,7 +46,7 @@ Examples:
   kubectl kedify dump -A                         ... collect diagnostic info from all namespaces
   kubectl kedify dump -q                         ... collect diagnostic info quietly (no status messages)
   kubectl kedify dump -o /tmp/data               ... collect diagnostic info to '/tmp/data' directory
-  kubectl kedify dump -o data.tar.gz --archive  ... collect diagnostic info and store in 'data.tar.gz' archive
+  kubectl kedify dump -o data.tar.gz -a         ... collect diagnostic info and store in 'data.tar.gz' archive
 
 EOF
 }
@@ -907,8 +909,12 @@ function dump::cmd() {
                 quiet_mode="true"
                 QUIET_MODE="true"
                 ;;
-            --archive)
+            -a|--archive)
                 create_archive="true"
+                ;;
+            -h|--help)
+                dump::__print_usage
+                exit 0
                 ;;
             *)
                 echo "Unknown flag: $o"
@@ -918,7 +924,8 @@ function dump::cmd() {
                 echo "  -n|--namespace      ... specific namespace (default: current namespace)"
                 echo "  -A|--all-namespaces ... collect from all namespaces"
                 echo "  -q|--quiet          ... quiet mode - suppress all status output"
-                echo "  --archive           ... create tar.gz archive"
+                echo "  -a|--archive        ... create tar.gz archive"
+                echo "  -h|--help           ... show this help message"
                 dump::__print_usage
                 exit 1
                 ;;

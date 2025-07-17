@@ -162,6 +162,7 @@ Analyzes ScaledObjects for potential configuration issues and provides actionabl
 Options:
   -n, --namespace NAMESPACE    Analyze ScaledObjects in the specified namespace
   -A, --all-namespaces         Analyze ScaledObjects across all namespaces
+
   -h, --help                   Show this help message
 
 Examples:

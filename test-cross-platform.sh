@@ -122,8 +122,8 @@ export DIR
 $(for script in "${sh_scripts[@]}"; do [[ -n "$script" ]] && echo "source $script"; done)
 
 # Dynamically find all module command functions
-# These are functions that follow the pattern: <module>::cmd or <module>_cmd
-module_functions=\$(declare -F | awk '{print \$3}' | grep -E '(::cmd|_cmd)\$' | grep -v '^_')
+# These are functions that follow the pattern: <module>::cmd
+module_functions=\$(declare -F | awk '{print \$3}' | grep -E '::cmd\$' | grep -v '^_')
 functions_found=0
 
 echo "DISCOVERED_MODULES:"

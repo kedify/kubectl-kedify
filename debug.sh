@@ -96,7 +96,9 @@ Available commands:
 
 Examples:
   kubectl kedify debug scaledobject -n default foo     ... inspect ScaledObject resource named 'foo' in the 'default' namespace
+  kubectl kedify debug scaledobject --watch            ... continuously watch all ScaledObjects and update every second
   kubectl kedify debug httpaddon queue                 ... check the queue sizes in each HTTP addon interceptor pod
+  kubectl kedify debug httpaddon queue --watch         ... continuously watch HTTP addon queue sizes and update every second
 
 EOF
 }
@@ -136,6 +138,7 @@ function debug::__httpaddon_cmd() {
     fi
     local output_type=""
     local mode="aggregated"
+    local watch="false"
     local next="false"
     for o in "$@"; do
         if [[ "$next" == "true" ]]; then
@@ -159,20 +162,39 @@ function debug::__httpaddon_cmd() {
             -i|--individual)
                 mode="individual"
                 ;;
+            -w|--watch)
+                watch="true"
+                ;;
             *)
                 echo "Unknown flag: $o"
                 echo "" 
                 echo "Available flags:"
                 echo "  -o|--output         ... output format (json, yaml)"
                 echo "  -i|--individual     ... show individual queue sizes per interceptor instead of aggregating"
+                echo "  -w|--watch          ... continuously watch and update every second"
                 debug::__print_usage
+                exit 1
+                ;;
         esac
     done
     case $sub_command in
         queue)
-            kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" -o json | jq -r '.items[].metadata.name' | while read -r pod; do
-                kubectl get --raw "/api/v1/namespaces/$ns/pods/$pod/proxy/queue" | jq -r '. | {name: "'$pod'", queue: .}'
-            done | debug::__aggregate_interceptor_queue "$output_type" "$mode"
+            if [[ "$watch" == "true" ]]; then
+                while true; do
+                    output=$(kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" -o json | jq -r '.items[].metadata.name' | while read -r pod; do
+                        kubectl get --raw "/api/v1/namespaces/$ns/pods/$pod/proxy/queue" | jq -r '. | {name: "'$pod'", queue: .}'
+                    done | debug::__aggregate_interceptor_queue "$output_type" "$mode")
+                    clear
+                    echo "$(date): HTTP Add-on Queue Status (Press Ctrl+C to stop)"
+                    echo ""
+                    echo "$output"
+                    sleep 1
+                done
+            else
+                kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" -o json | jq -r '.items[].metadata.name' | while read -r pod; do
+                    kubectl get --raw "/api/v1/namespaces/$ns/pods/$pod/proxy/queue" | jq -r '. | {name: "'$pod'", queue: .}'
+                done | debug::__aggregate_interceptor_queue "$output_type" "$mode"
+            fi
             ;;
         *)
             echo "Unknown sub-command: \"$sub_command\""
@@ -264,6 +286,7 @@ function debug::__scaledobject_cmd() {
     local output_type=""
     local next="false"
     local print_namespace="false"
+    local watch="false"
 
     for o in "$@"; do
         if [[ "$next" == "true" ]]; then
@@ -285,23 +308,81 @@ function debug::__scaledobject_cmd() {
                 output_type="${o#--output}"
                 ;;
             -w|--watch)
-                # TODO: figure out what to do with this 
+                watch="true"
                 ;;
             --all-namespaces|-A)
                 print_namespace="true"
                 filtered_flags+=("$o")
                 ;;
             *)
-                filtered_flags+=("$o")
+                # Check if it's a flag (starts with -)
+                if [[ "$o" == -* ]]; then
+                    echo "Unknown flag: $o"
+                    echo ""
+                    echo "Available flags:"
+                    echo "  -o|--output         ... output format (json, yaml, wide)"
+                    echo "  -w|--watch          ... continuously watch and update every second"
+                    echo "  -A|--all-namespaces ... list resources from all namespaces"
+                    debug::__print_usage
+                    exit 1
+                else
+                    filtered_flags+=("$o")
+                fi
                 ;;
         esac
     done
 
-    local output=""
-    if [[ $# -eq 0 ]]; then
-        output=$(kubectl get scaledobjects -o json)
+    if [[ "$watch" == "true" ]]; then
+        while true; do
+            if [[ ${#filtered_flags[@]} -eq 0 ]]; then
+                output=$(debug::__execute_scaledobject_once "$output_type" "$print_namespace")
+            else
+                output=$(debug::__execute_scaledobject_once "$output_type" "$print_namespace" "${filtered_flags[@]}")
+            fi
+            clear
+            echo "$(date): ScaledObject Status (Press Ctrl+C to stop)"
+            echo ""
+            echo "$output"
+            sleep 1
+        done
     else
-        output=$(kubectl get scaledobjects "${filtered_flags[@]}" -o json)
+        if [[ ${#filtered_flags[@]} -eq 0 ]]; then
+            debug::__execute_scaledobject_once "$output_type" "$print_namespace"
+        else
+            debug::__execute_scaledobject_once "$output_type" "$print_namespace" "${filtered_flags[@]}"
+        fi
+    fi
+}
+
+function debug::__execute_scaledobject_once() {
+    local output_type="$1"
+    local print_namespace="$2"
+    shift 2
+    local filtered_flags=("$@")
+
+    local output=""
+    local error_output=""
+    if [[ ${#filtered_flags[@]} -eq 0 ]]; then
+        if ! output=$(kubectl get scaledobjects -o json 2>&1); then
+            echo "Error: Failed to get ScaledObjects. Make sure KEDA is installed and you have the necessary permissions."
+            exit 1
+        fi
+    else
+        if ! output=$(kubectl get scaledobjects "${filtered_flags[@]}" -o json 2>&1); then
+            # Check if it's a "not found" error
+            if echo "$output" | grep -q "not found"; then
+                # Extract the resource name from the error message
+                local resource_name=$(echo "$output" | sed -n 's/.*scaledobjects.keda.sh "\([^"]*\)" not found.*/\1/p')
+                if [[ -n "$resource_name" ]]; then
+                    echo "ScaledObject \"$resource_name\" not found"
+                else
+                    echo "ScaledObject not found"
+                fi
+            else
+                echo "Error: $output"
+            fi
+            exit 1
+        fi
     fi
     local kind=$(echo "$output" | jq -r '.kind')
     local formatting_cmd=""

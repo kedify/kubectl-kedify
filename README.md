@@ -149,13 +149,3 @@ The script automatically detects whether it's running as a kubectl plugin (via k
 - **Locally**: Uses scripts from the project directory
 
 This allows for seamless development and testing of unreleased features.
-
-## Release Process
-
-To create a new release of the kubectl-kedify plugin:
-
-1. **Update the version**: Modify the version number in the [`VERSION`](VERSION) file
-2. **Create GitHub release**: Create a new release on GitHub - this will automatically open a pull request
-3. **Merge the PR**: After the automated PR is created, review and merge it to complete the release
-
-The release automation handles updating the krew manifest and other necessary release artifacts.

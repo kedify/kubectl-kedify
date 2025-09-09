@@ -48,11 +48,21 @@ function dump::__parse_cluster_data_option() {
     local option="$1"
     local value=""
     
-    # Handle -cVALUE format (like -ctrue, -cfalse)
-    if [[ "$option" == "-c"* && "$option" != "-c" && "$option" != "-c="* ]]; then
+    # Handle -c=VALUE format (like -c=true, -c=false)
+    if [[ "$option" == "-c="* ]]; then
+        value="${option#-c=}"
+    # Handle --collect-cluster-data=VALUE format
+    elif [[ "$option" == "--collect-cluster-data="* ]]; then
+        value="${option#--collect-cluster-data=}"
+    # Match '-c' followed by a value (e.g., '-ctrue' or '-cfalse'), but NOT bare '-c'
+    elif [[ "$option" == "-c"?* ]]; then
+        # This ensures that only '-c' immediately followed by a value is accepted.
         value="${option#-c}"
-    # Handle --collect-cluster-dataVALUE format
-    elif [[ "$option" == "--collect-cluster-data"* && "$option" != "--collect-cluster-data" && "$option" != "--collect-cluster-data="* ]]; then
+    # Match '--collect-cluster-data' followed by a value (e.g., '--collect-cluster-
+    # datatrue'), but NOT bare '--collect-cluster-data'
+    elif [[ "$option" == "--collect-cluster-data"?* ]]; then
+        # This ensures that only '--collect-cluster-data' immediately followed by a value is
+        # accepted.
         value="${option#--collect-cluster-data}"
     else
         echo "Error: Invalid format for cluster data option: '$option'" >&2
@@ -844,7 +854,7 @@ function dump::__generate_summary_file() {
     
     # Pre-compute values to avoid issues with array expansion in heredoc
     local current_date=$(date)
-    local kubectl_context=$(kubectl config current-context)
+    local kubectl_context=$(kubectl config current-context 2>/dev/null || echo "unknown")
     local namespaces_count=0
     if [[ ${#collected_namespaces[@]} -gt 0 ]]; then
         namespaces_count=${#collected_namespaces[@]}
@@ -1108,6 +1118,14 @@ function dump::cmd() {
             -c=*|--collect-cluster-data=*)
                 COLLECT_CLUSTER_DATA="$(dump::__validate_bool "${o#*=}")"
                 ;;
+            -c=*|--collect-cluster-data=*)
+                # Handle formats like -c=true, -c=false, --collect-cluster-data=true, --collect-cluster-data=false
+                COLLECT_CLUSTER_DATA="$(dump::__parse_cluster_data_option "$o")"
+                ;;
+            -c?*|--collect-cluster-data?*)
+                # Handle formats like -ctrue, -cfalse, --collect-cluster-datatrue, --collect-cluster-datafalse
+                COLLECT_CLUSTER_DATA="$(dump::__parse_cluster_data_option "$o")"
+                ;;
             -c|--collect-cluster-data)
                 # Look ahead to see if next argument is a boolean value
                 local next_idx=$((i + 1))
@@ -1118,10 +1136,6 @@ function dump::cmd() {
                     # No boolean value following, default to true
                     COLLECT_CLUSTER_DATA="true"
                 fi
-                ;;
-            -c*|--collect-cluster-data*)
-                # Handle formats like -ctrue, -cfalse, --collect-cluster-datatrue, --collect-cluster-datafalse
-                COLLECT_CLUSTER_DATA="$(dump::__parse_cluster_data_option "$o")"
                 ;;
             -h|--help)
                 dump::__print_usage

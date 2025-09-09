@@ -31,6 +31,7 @@ Simple TUI based shell script for installing and interfacing with Kedify.
   - Gathers cluster-wide information (nodes, autoscaler data, etc.)
   - Collects namespace-specific data (events, scaling resources, pod logs)
   - Supports output to directory or compressed archive format
+  - Use `-c false` or `--collect-cluster-data=false` to skip cluster-wide data collection for faster execution
 
 ## Quick start
 
@@ -116,6 +117,7 @@ All the same options available in the kubectl plugin are supported:
 - `-A, --all-namespaces` - Collect from all namespaces
 - `-q, --quiet` - Quiet mode - suppress all status output for cleaner automation
 - `--archive` - Create tar.gz archive
+- `-c, --collect-cluster-data=BOOL` - Collect cluster-wide data (default: true)
 
 ### Requirements for Standalone Usage
 

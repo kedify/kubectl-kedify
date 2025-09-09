@@ -36,15 +36,12 @@ function dump::__is_boolean_value() {
 
 function dump::__validate_bool() {
     local value="$1"
-    case "$value" in
-        true|false)
-            echo "$value"
-            ;;
-        *)
-            echo "Error: Invalid boolean value '$value'. Use 'true' or 'false'." >&2
-            exit 1
-            ;;
-    esac
+    if dump::__is_boolean_value "$value"; then
+        echo "$value"
+    else
+        echo "Error: Invalid boolean value '$value'. Use 'true' or 'false'." >&2
+        exit 1
+    fi
 }
 
 function dump::__parse_cluster_data_option() {
@@ -207,7 +204,7 @@ function dump::__aggregate_interceptor_queue() {
         )
       else
         # Individual mode: preserve pod names
-        [inputs | select(.name and .queue) | {pod: .name, queue: (.queue // {})}]
+        [inputs | select(.name and .queue) | {pod: .name, queue: .queue}]
       end
     ' | eval "$cmd"
 }

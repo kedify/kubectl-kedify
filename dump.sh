@@ -6,6 +6,9 @@ set -Eo functrace
 # Global variable for quiet mode
 QUIET_MODE="false"
 
+# Global variable for cluster-wide data collection
+COLLECT_CLUSTER_DATA="true"
+
 function dump::__failure() {
     local lineno=$1
     local msg=$2
@@ -17,6 +20,19 @@ function dump::__print_status() {
     if [[ "$QUIET_MODE" != "true" ]]; then
         echo -e "$@"
     fi
+}
+
+function dump::__validate_bool() {
+    local value="$1"
+    case "$value" in
+        true|false)
+            echo "$value"
+            ;;
+        *)
+            echo "Error: Invalid boolean value '$value'. Use 'true' or 'false'." >&2
+            exit 1
+            ;;
+    esac
 }
 
 
@@ -32,21 +48,24 @@ Collects comprehensive diagnostic information from Kedify/KEDA components includ
 - Kedify/KEDA component configurations and status
 
 Options:
-  -o, --output DIR         Output directory or archive file path (default: current directory)
-  -n, --namespace NS       Specific namespace (default: current namespace)  
-  -A, --all-namespaces     Collect from all namespaces
-  -q, --quiet              Quiet mode - suppress all status output
-  -a, --archive            Create tar.gz archive
+  -o, --output DIR                  Output directory or archive file path (default: current directory)
+  -n, --namespace NS                Specific namespace (default: current namespace)  
+  -A, --all-namespaces              Collect from all namespaces
+  -q, --quiet                       Quiet mode - suppress all status output
+  -a, --archive                     Create tar.gz archive
+  -c, --collect-cluster-data=BOOL   Collect cluster-wide data (default: true)
 
   -h, --help               Show this help message
 
 Examples:
-  kubectl kedify dump                            ... collect diagnostic info from current namespace
-  kubectl kedify dump -n myapp                   ... collect diagnostic info from 'myapp' namespace
-  kubectl kedify dump -A                         ... collect diagnostic info from all namespaces
-  kubectl kedify dump -q                         ... collect diagnostic info quietly (no status messages)
-  kubectl kedify dump -o /tmp/data               ... collect diagnostic info to '/tmp/data' directory
-  kubectl kedify dump -o data.tar.gz -a         ... collect diagnostic info and store in 'data.tar.gz' archive
+  kubectl kedify dump                               ... collect diagnostic info from current namespace
+  kubectl kedify dump -n myapp                      ... collect diagnostic info from 'myapp' namespace
+  kubectl kedify dump -A                            ... collect diagnostic info from all namespaces
+  kubectl kedify dump -q                            ... collect diagnostic info quietly (no status messages)
+  kubectl kedify dump -o /tmp/data                  ... collect diagnostic info to '/tmp/data' directory
+  kubectl kedify dump -o data.tar.gz -a             ... collect diagnostic info and store in 'data.tar.gz' archive
+  kubectl kedify dump -c=false                      ... don't collect diagnostic info without cluster-wide data
+  kubectl kedify dump --collect-cluster-data=false  ... don't collect diagnostic info without cluster-wide data
 
 EOF
 }
@@ -870,6 +889,9 @@ function dump::cmd() {
                 "namespace")
                     target_ns="$o"
                     ;;
+                "collect-cluster-data")
+                    COLLECT_CLUSTER_DATA="$(dump::__validate_bool "$o")"
+                    ;;
             esac
             next="false"
             next_type=""
@@ -912,6 +934,27 @@ function dump::cmd() {
             -a|--archive)
                 create_archive="true"
                 ;;
+            -c|--collect-cluster-data)
+                next="true"
+                next_type="collect-cluster-data"
+                ;;
+            -c=*|--collect-cluster-data=*)
+                COLLECT_CLUSTER_DATA="$(dump::__validate_bool "${o#*=}")"
+                ;;
+            -c*)
+                if [[ "$o" == "-c="* ]]; then
+                    COLLECT_CLUSTER_DATA="$(dump::__validate_bool "${o#-c=}")"
+                else
+                    COLLECT_CLUSTER_DATA="$(dump::__validate_bool "${o#-c}")"
+                fi
+                ;;
+            --collect-cluster-data*)
+                if [[ "$o" == "--collect-cluster-data="* ]]; then
+                    COLLECT_CLUSTER_DATA="$(dump::__validate_bool "${o#--collect-cluster-data=}")"
+                else
+                    COLLECT_CLUSTER_DATA="$(dump::__validate_bool "${o#--collect-cluster-data}")"
+                fi
+                ;;
             -h|--help)
                 dump::__print_usage
                 exit 0
@@ -925,6 +968,7 @@ function dump::cmd() {
                 echo "  -A|--all-namespaces ... collect from all namespaces"
                 echo "  -q|--quiet          ... quiet mode - suppress all status output"
                 echo "  -a|--archive        ... create tar.gz archive"
+                echo "  -c|--collect-cluster-data=BOOL ... collect cluster-wide data (default: true)"
                 echo "  -h|--help           ... show this help message"
                 dump::__print_usage
                 exit 1
@@ -1002,14 +1046,16 @@ function dump::cmd() {
     fi
     dump::__print_status ""
     
-    dump::__print_status "\033[33m=== Processing Cluster Information ===\033[0m"
-    
-    # Create cluster information directory
-    local cluster_dir="${tempdir}/_cluster-info"
-    mkdir -p "$cluster_dir"
-    
-    # Node Information Section
-    dump::__print_status "\033[36mCollecting node information...\033[0m"
+    # Collect cluster-wide information if enabled
+    if [[ "$COLLECT_CLUSTER_DATA" == "true" ]]; then
+        dump::__print_status "\033[33m=== Processing Cluster Information ===\033[0m"
+        
+        # Create cluster information directory
+        local cluster_dir="${tempdir}/_cluster-info"
+        mkdir -p "$cluster_dir"
+        
+        # Node Information Section
+        dump::__print_status "\033[36mCollecting node information...\033[0m"
     
     # Node resource usage
     if kubectl top nodes --no-headers 2>/dev/null > "${cluster_dir}/cluster-nodes-resource-usage.txt"; then
@@ -1244,6 +1290,9 @@ function dump::cmd() {
     fi
     
     dump::__print_status "\033[32mCompleted: cluster information\033[0m"
+    else
+        dump::__print_status "\033[90mSkipping cluster-wide data collection (--collect-cluster-data=false)\033[0m"
+    fi
     
     dump::__print_status ""
     

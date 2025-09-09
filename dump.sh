@@ -22,6 +22,18 @@ function dump::__print_status() {
     fi
 }
 
+function dump::__is_boolean_value() {
+    local value="$1"
+    case "$value" in
+        true|false)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 function dump::__validate_bool() {
     local value="$1"
     case "$value" in
@@ -33,6 +45,29 @@ function dump::__validate_bool() {
             exit 1
             ;;
     esac
+}
+
+function dump::__parse_cluster_data_option() {
+    local option="$1"
+    local value=""
+    
+    # Handle -cVALUE format (like -ctrue, -cfalse)
+    if [[ "$option" == "-c"* && "$option" != "-c" && "$option" != "-c="* ]]; then
+        value="${option#-c}"
+    # Handle --collect-cluster-dataVALUE format
+    elif [[ "$option" == "--collect-cluster-data"* && "$option" != "--collect-cluster-data" && "$option" != "--collect-cluster-data="* ]]; then
+        value="${option#--collect-cluster-data}"
+    else
+        echo "Error: Invalid format for cluster data option: '$option'" >&2
+        exit 1
+    fi
+    
+    if [[ -n "$value" ]]; then
+        dump::__validate_bool "$value"
+    else
+        echo "Error: Option '$option' requires a value (true/false)." >&2
+        exit 1
+    fi
 }
 
 
@@ -53,7 +88,7 @@ Options:
   -A, --all-namespaces              Collect from all namespaces
   -q, --quiet                       Quiet mode - suppress all status output
   -a, --archive                     Create tar.gz archive
-  -c, --collect-cluster-data=BOOL   Collect cluster-wide data (default: true)
+  -c, --collect-cluster-data[=BOOL] Collect cluster-wide data (default: true)
 
   -h, --help               Show this help message
 
@@ -64,8 +99,9 @@ Examples:
   kubectl kedify dump -q                            ... collect diagnostic info quietly (no status messages)
   kubectl kedify dump -o /tmp/data                  ... collect diagnostic info to '/tmp/data' directory
   kubectl kedify dump -o data.tar.gz -a             ... collect diagnostic info and store in 'data.tar.gz' archive
-  kubectl kedify dump -c=false                      ... don't collect diagnostic info without cluster-wide data
-  kubectl kedify dump --collect-cluster-data=false  ... don't collect diagnostic info without cluster-wide data
+  kubectl kedify dump -c                            ... explicitly enable cluster-wide data collection
+  kubectl kedify dump -c false                      ... disable cluster-wide data collection
+  kubectl kedify dump -c=false                      ... disable cluster-wide data collection
 
 EOF
 }
@@ -145,29 +181,33 @@ function dump::__aggregate_interceptor_queue() {
       if $mode == "aggregated" then
         # Aggregate all queues (original behavior)
         reduce inputs as $in ({};
-          reduce ($in.queue | to_entries[]) as $entry (.;
-            .[$entry.key] as $existing |
-            if $existing then
-              .[$entry.key] = (
-                $existing |
-                with_entries(
-                  .value as $v |
-                  $entry.value[.key] as $new_val |
-                  if $new_val then
-                    .value = ($v + $new_val)
-                  else
-                    .
-                  end
+          if ($in.queue and ($in.queue | type) == "object") then
+            reduce ($in.queue | to_entries[]) as $entry (.;
+              .[$entry.key] as $existing |
+              if $existing then
+                .[$entry.key] = (
+                  $existing |
+                  with_entries(
+                    .value as $v |
+                    $entry.value[.key] as $new_val |
+                    if $new_val then
+                      .value = ($v + $new_val)
+                    else
+                      .
+                    end
+                  )
                 )
-              )
-            else
-              .[$entry.key] = $entry.value
-            end
-          )
+              else
+                .[$entry.key] = $entry.value
+              end
+            )
+          else
+            .
+          end
         )
       else
         # Individual mode: preserve pod names
-        [inputs | {pod: .name, queue: .queue}]
+        [inputs | select(.name and .queue) | {pod: .name, queue: (.queue // {})}]
       end
     ' | eval "$cmd"
 }
@@ -179,10 +219,10 @@ function dump::__addon_queue_structured_output() {
 jq -r '
 (["POD", "TARGET", "CONCURRENCY", "RPS"],
  (.[] | [
-    .pod,
-    (.queue | keys[0]),
-    .queue[.queue | keys[0]].Concurrency,
-    .queue[.queue | keys[0]].RPS
+    (.pod // "unknown"),
+    (if .queue then (.queue | keys[0] // "unknown") else "unknown" end),
+    (if .queue and (.queue | keys[0]) then .queue[.queue | keys[0]].Concurrency // 0 else 0 end),
+    (if .queue and (.queue | keys[0]) then .queue[.queue | keys[0]].RPS // 0 else 0 end)
  ]))
  | @tsv'
 EOF
@@ -192,8 +232,8 @@ jq -r '
 (["TARGET", "CONCURRENCY", "RPS"],
  (to_entries[] | [
     .key,
-    .value.Concurrency,
-    .value.RPS
+    (.value.Concurrency // 0),
+    (.value.RPS // 0)
  ]))
  | @tsv'
 EOF
@@ -799,6 +839,136 @@ function dump::__collect_namespace_data() {
     dump::__print_status ""
 }
 
+function dump::__generate_summary_file() {
+    local tempdir="$1"
+    local installation_ns="$2"
+    shift 2
+    local collected_namespaces=("$@")
+    
+    # Pre-compute values to avoid issues with array expansion in heredoc
+    local current_date=$(date)
+    local kubectl_context=$(kubectl config current-context)
+    local namespaces_count=0
+    if [[ ${#collected_namespaces[@]} -gt 0 ]]; then
+        namespaces_count=${#collected_namespaces[@]}
+    fi
+    
+    cat > "${tempdir}/dump-summary.txt" << 'EOF'
+Kedify Diagnostic Information
+=============================
+EOF
+
+    # Add dynamic content that requires variable substitution
+    cat >> "${tempdir}/dump-summary.txt" << EOF
+Generated: $current_date
+Kubectl Context: $kubectl_context
+Installation Namespace: $installation_ns
+Namespaces Processed: $namespaces_count
+
+Top-level Files:
+- dump-summary.txt                        ... This summary file
+- cluster-health-summary.txt              ... Quick overview of cluster health and issues
+
+EOF
+
+    # Add cluster-wide files section only if cluster data was collected
+    if [[ "$COLLECT_CLUSTER_DATA" == "true" && -n "${cluster_dir:-}" ]]; then
+        cat >> "${tempdir}/dump-summary.txt" << EOF
+Cluster-wide Files (_cluster-info/):
+- cluster-nodes-resource-usage.txt        ... CPU/Memory usage for all nodes
+- cluster-nodes.yaml                      ... Complete node specifications and status
+- cluster-node-*-describe.txt             ... Detailed node descriptions (conditions, taints, allocations)
+EOF
+
+        # Add conditional cluster files
+        if [[ -f "${cluster_dir}/cluster-resource-allocation.txt" ]]; then
+            echo "- cluster-resource-allocation.txt         ... Resource allocation summary across nodes" >> "${tempdir}/dump-summary.txt"
+        fi
+        if [[ -f "${cluster_dir}/cluster-autoscaler-events.yaml" ]]; then
+            echo "- cluster-autoscaler-events.yaml          ... Cluster autoscaler scaling events" >> "${tempdir}/dump-summary.txt"
+        fi
+        if [[ -f "${cluster_dir}/cluster-autoscaler-deployments.yaml" ]]; then
+            echo "- cluster-autoscaler-deployments.yaml     ... Cluster autoscaler deployment configurations" >> "${tempdir}/dump-summary.txt"
+        fi
+        if [[ -f "${cluster_dir}/cluster-autoscaler-pods.yaml" ]]; then
+            echo "- cluster-autoscaler-pods.yaml            ... Cluster autoscaler pod specifications" >> "${tempdir}/dump-summary.txt"
+        fi
+        if ls "${cluster_dir}"/cluster-autoscaler-config-*.yaml >/dev/null 2>&1; then
+            echo "- cluster-autoscaler-config-*.yaml        ... Cluster autoscaler configuration files" >> "${tempdir}/dump-summary.txt"
+        fi
+        if ls "${cluster_dir}"/cluster-autoscaler-*-logs.txt >/dev/null 2>&1; then
+            echo "- cluster-autoscaler-*-logs.txt           ... Cluster autoscaler controller logs" >> "${tempdir}/dump-summary.txt"
+        fi
+        if ls "${cluster_dir}"/cluster-autoscaler-*-status.json >/dev/null 2>&1; then
+            echo "- cluster-autoscaler-*-status.json        ... Cluster autoscaler status API output" >> "${tempdir}/dump-summary.txt"
+        fi
+        if [[ -f "${cluster_dir}/karpenter-events.yaml" ]]; then
+            echo "- karpenter-events.yaml                   ... Karpenter scaling events" >> "${tempdir}/dump-summary.txt"
+        fi
+        if [[ -f "${cluster_dir}/karpenter-nodepools.yaml" ]]; then
+            echo "- karpenter-nodepools.yaml                ... Karpenter NodePool configurations" >> "${tempdir}/dump-summary.txt"
+        fi
+        if [[ -f "${cluster_dir}/karpenter-nodeclaims.yaml" ]]; then
+            echo "- karpenter-nodeclaims.yaml               ... Karpenter NodeClaim status" >> "${tempdir}/dump-summary.txt"
+        fi
+        if [[ -f "${cluster_dir}/karpenter-provisioners.yaml" ]]; then
+            echo "- karpenter-provisioners.yaml             ... Karpenter Provisioners (legacy)" >> "${tempdir}/dump-summary.txt"
+        fi
+        if ls "${cluster_dir}"/karpenter-*-logs.txt >/dev/null 2>&1; then
+            echo "- karpenter-*-logs.txt                    ... Karpenter controller logs" >> "${tempdir}/dump-summary.txt"
+        fi
+        if [[ -f "${cluster_dir}/cluster-pending-pods.yaml" ]]; then
+            echo "- cluster-pending-pods.yaml               ... Pods stuck in Pending state (resource constraints)" >> "${tempdir}/dump-summary.txt"
+        fi
+        echo "" >> "${tempdir}/dump-summary.txt"
+    else
+        cat >> "${tempdir}/dump-summary.txt" << EOF
+Cluster-wide Files:
+- No cluster-wide data collected (--collect-cluster-data=false was used)
+
+EOF
+    fi
+
+    # Add the rest of the static content
+    cat >> "${tempdir}/dump-summary.txt" << EOF
+Per-namespace Files:
+- events.yaml                             ... Kubernetes events for the namespace
+- scaledobjects.yaml                      ... ScaledObject resources (if any)
+- hpa.yaml                                ... HorizontalPodAutoscaler resources (if any)
+- scaledjobs.yaml                         ... ScaledJob resources (if any)
+- httpscaledobjects.yaml                  ... HTTPScaledObject resources (if any)
+- httpscaledobjects-services.yaml         ... Services referenced by HTTPScaledObjects (if any)
+- podresourceprofiles.yaml                ... PodResourceProfile resources (if any)
+- scalinggroups.yaml                      ... ScalingGroup resources (if any)
+- scalingpolicies.yaml                    ... ScalingPolicy resources (if any)
+- kedify-proxy-*-pod.yaml                 ... Pod manifests for kedify-proxy pods
+- kedify-proxy-*-logs.txt                 ... Logs from kedify-proxy pods
+- kedify-proxy-*-config_dump.json         ... Envoy configuration dumps
+- kedify-proxy-*-prometheus.txt           ... Prometheus metrics from kedify-proxy
+
+Installation namespace additional files:
+- kedify-resource.yaml                    ... KedifyConfiguration resource (if any)
+- helm-kedify-agent-values.yaml           ... Kedify Helm values used during installation (if available)
+- helm-kedify-agent-info.txt              ... Kedify Helm version information (if available)
+- helm-*-values.yaml                      ... Additional Helm values files (KEDA, HTTP Add-on, etc.)
+- http-addon-queue-*.txt                  ... HTTP Add-on queue data in table format
+- http-addon-queue.json                   ... HTTP Add-on queue data in JSON format
+
+Directory Structure:
+EOF
+
+    # Add dynamic directory listing
+    find "$tempdir" -type d | sort >> "${tempdir}/dump-summary.txt"
+    
+    cat >> "${tempdir}/dump-summary.txt" << EOF
+
+Files collected:
+EOF
+
+    # Add dynamic file listing
+    find "$tempdir" -type f -name "*.yaml" -o -name "*.txt" -o -name "*.json" | sort >> "${tempdir}/dump-summary.txt"
+}
+
 function dump::cmd() {
     # Check if required tools are available
     local missing_tools=()
@@ -880,7 +1050,12 @@ function dump::cmd() {
         current_ns="default"
     fi
     
-    for o in "$@"; do
+    # Parse command line arguments
+    local args=("$@")
+    local i=0
+    while [[ $i -lt ${#args[@]} ]]; do
+        local o="${args[i]}"
+        
         if [[ "$next" == "true" ]]; then
             case "$next_type" in
                 "output")
@@ -889,14 +1064,13 @@ function dump::cmd() {
                 "namespace")
                     target_ns="$o"
                     ;;
-                "collect-cluster-data")
-                    COLLECT_CLUSTER_DATA="$(dump::__validate_bool "$o")"
-                    ;;
             esac
             next="false"
             next_type=""
+            i=$((i + 1))
             continue
         fi
+        
         case $o in
             -o|--output)
                 next="true"
@@ -934,26 +1108,23 @@ function dump::cmd() {
             -a|--archive)
                 create_archive="true"
                 ;;
-            -c|--collect-cluster-data)
-                next="true"
-                next_type="collect-cluster-data"
-                ;;
             -c=*|--collect-cluster-data=*)
                 COLLECT_CLUSTER_DATA="$(dump::__validate_bool "${o#*=}")"
                 ;;
-            -c*)
-                if [[ "$o" == "-c="* ]]; then
-                    COLLECT_CLUSTER_DATA="$(dump::__validate_bool "${o#-c=}")"
+            -c|--collect-cluster-data)
+                # Look ahead to see if next argument is a boolean value
+                local next_idx=$((i + 1))
+                if [[ $next_idx -lt ${#args[@]} ]] && dump::__is_boolean_value "${args[next_idx]}"; then
+                    COLLECT_CLUSTER_DATA="$(dump::__validate_bool "${args[next_idx]}")"
+                    i=$((i + 1))  # Skip the next argument since we consumed it
                 else
-                    COLLECT_CLUSTER_DATA="$(dump::__validate_bool "${o#-c}")"
+                    # No boolean value following, default to true
+                    COLLECT_CLUSTER_DATA="true"
                 fi
                 ;;
-            --collect-cluster-data*)
-                if [[ "$o" == "--collect-cluster-data="* ]]; then
-                    COLLECT_CLUSTER_DATA="$(dump::__validate_bool "${o#--collect-cluster-data=}")"
-                else
-                    COLLECT_CLUSTER_DATA="$(dump::__validate_bool "${o#--collect-cluster-data}")"
-                fi
+            -c*|--collect-cluster-data*)
+                # Handle formats like -ctrue, -cfalse, --collect-cluster-datatrue, --collect-cluster-datafalse
+                COLLECT_CLUSTER_DATA="$(dump::__parse_cluster_data_option "$o")"
                 ;;
             -h|--help)
                 dump::__print_usage
@@ -974,6 +1145,7 @@ function dump::cmd() {
                 exit 1
                 ;;
         esac
+        i=$((i + 1))
     done
     
     # Set up output directory
@@ -1046,12 +1218,16 @@ function dump::cmd() {
     fi
     dump::__print_status ""
     
+    # Initialize cluster_dir variable
+    local cluster_dir=""
+    
     # Collect cluster-wide information if enabled
     if [[ "$COLLECT_CLUSTER_DATA" == "true" ]]; then
         dump::__print_status "\033[33m=== Processing Cluster Information ===\033[0m"
+        dump::__print_status "\033[90m(It may take a while)\033[0m"
         
         # Create cluster information directory
-        local cluster_dir="${tempdir}/_cluster-info"
+        cluster_dir="${tempdir}/_cluster-info"
         mkdir -p "$cluster_dir"
         
         # Node Information Section
@@ -1369,69 +1545,15 @@ function dump::cmd() {
     
     # Generate cluster health summary
     dump::__print_status "\033[36mGenerating cluster health summary...\033[0m"
-    dump::__generate_cluster_health_summary "$tempdir" "$cluster_dir"
+    if [[ "$COLLECT_CLUSTER_DATA" == "true" ]]; then
+        dump::__generate_cluster_health_summary "$tempdir" "$cluster_dir"
+    else
+        dump::__generate_cluster_health_summary "$tempdir" ""
+    fi
     dump::__print_status "  \033[32m✓ Cluster health summary generated\033[0m"
     
     # Create summary file
-    cat > "${tempdir}/dump-summary.txt" << EOF
-Kedify Diagnostic Information
-=============================
-Generated: $(date)
-Kubectl Context: $(kubectl config current-context)
-Installation Namespace: $installation_ns
-Namespaces Processed: ${#collected_namespaces[@]:-0}
-
-Top-level Files:
-- dump-summary.txt                        ... This summary file
-- cluster-health-summary.txt              ... Quick overview of cluster health and issues
-
-Cluster-wide Files (_cluster-info/):
-- cluster-nodes-resource-usage.txt        ... CPU/Memory usage for all nodes
-- cluster-nodes.yaml                      ... Complete node specifications and status
-- cluster-node-*-describe.txt             ... Detailed node descriptions (conditions, taints, allocations)$(if [[ -f "${cluster_dir}/cluster-resource-allocation.txt" ]]; then echo "
-- cluster-resource-allocation.txt         ... Resource allocation summary across nodes"; fi)$(if [[ -f "${cluster_dir}/cluster-autoscaler-events.yaml" ]]; then echo "
-- cluster-autoscaler-events.yaml          ... Cluster autoscaler scaling events"; fi)$(if [[ -f "${cluster_dir}/cluster-autoscaler-deployments.yaml" ]]; then echo "
-- cluster-autoscaler-deployments.yaml     ... Cluster autoscaler deployment configurations"; fi)$(if [[ -f "${cluster_dir}/cluster-autoscaler-pods.yaml" ]]; then echo "
-- cluster-autoscaler-pods.yaml            ... Cluster autoscaler pod specifications"; fi)$(if ls "${cluster_dir}"/cluster-autoscaler-config-*.yaml >/dev/null 2>&1; then echo "
-- cluster-autoscaler-config-*.yaml        ... Cluster autoscaler configuration files"; fi)$(if ls "${cluster_dir}"/cluster-autoscaler-*-logs.txt >/dev/null 2>&1; then echo "
-- cluster-autoscaler-*-logs.txt           ... Cluster autoscaler controller logs"; fi)$(if ls "${cluster_dir}"/cluster-autoscaler-*-status.json >/dev/null 2>&1; then echo "
-- cluster-autoscaler-*-status.json        ... Cluster autoscaler status API output"; fi)$(if [[ -f "${cluster_dir}/karpenter-events.yaml" ]]; then echo "
-- karpenter-events.yaml                   ... Karpenter scaling events"; fi)$(if [[ -f "${cluster_dir}/karpenter-nodepools.yaml" ]]; then echo "
-- karpenter-nodepools.yaml                ... Karpenter NodePool configurations"; fi)$(if [[ -f "${cluster_dir}/karpenter-nodeclaims.yaml" ]]; then echo "
-- karpenter-nodeclaims.yaml               ... Karpenter NodeClaim status"; fi)$(if [[ -f "${cluster_dir}/karpenter-provisioners.yaml" ]]; then echo "
-- karpenter-provisioners.yaml             ... Karpenter Provisioners (legacy)"; fi)$(if ls "${cluster_dir}"/karpenter-*-logs.txt >/dev/null 2>&1; then echo "
-- karpenter-*-logs.txt                    ... Karpenter controller logs"; fi)$(if [[ -f "${cluster_dir}/cluster-pending-pods.yaml" ]]; then echo "
-- cluster-pending-pods.yaml               ... Pods stuck in Pending state (resource constraints)"; fi)
-
-Per-namespace Files:
-- events.yaml                             ... Kubernetes events for the namespace
-- scaledobjects.yaml                      ... ScaledObject resources (if any)
-- hpa.yaml                                ... HorizontalPodAutoscaler resources (if any)
-- scaledjobs.yaml                         ... ScaledJob resources (if any)
-- httpscaledobjects.yaml                  ... HTTPScaledObject resources (if any)
-- httpscaledobjects-services.yaml         ... Services referenced by HTTPScaledObjects (if any)
-- podresourceprofiles.yaml                ... PodResourceProfile resources (if any)
-- scalinggroups.yaml                      ... ScalingGroup resources (if any)
-- scalingpolicies.yaml                    ... ScalingPolicy resources (if any)
-- kedify-proxy-*-pod.yaml                 ... Pod manifests for kedify-proxy pods
-- kedify-proxy-*-logs.txt                 ... Logs from kedify-proxy pods
-- kedify-proxy-*-config_dump.json         ... Envoy configuration dumps
-- kedify-proxy-*-prometheus.txt           ... Prometheus metrics from kedify-proxy
-
-Installation namespace additional files:
-- kedify-resource.yaml                    ... KedifyConfiguration resource (if any)
-- helm-kedify-agent-values.yaml           ... Kedify Helm values used during installation (if available)
-- helm-kedify-agent-info.txt              ... Kedify Helm version information (if available)
-- helm-*-values.yaml                      ... Additional Helm values files (KEDA, HTTP Add-on, etc.)
-- http-addon-queue-*.txt                  ... HTTP Add-on queue data in table format
-- http-addon-queue.json                   ... HTTP Add-on queue data in JSON format
-
-Directory Structure:
-$(find "$tempdir" -type d | sort)
-
-Files collected:
-$(find "$tempdir" -type f -name "*.yaml" -o -name "*.txt" -o -name "*.json" | sort)
-EOF
+    dump::__generate_summary_file "$tempdir" "$installation_ns" "${collected_namespaces[@]}"
     
     if [[ "$create_archive" == "true" ]]; then
         local archive_file
@@ -1507,9 +1629,15 @@ function dump::__generate_cluster_health_summary() {
     local pending_count=$(kubectl get pods --all-namespaces --field-selector=status.phase=Pending --no-headers 2>/dev/null | wc -l)
     if [[ $pending_count -gt 0 ]]; then
         echo "  ⚠ $pending_count pod(s) in Pending state" >> "$summary_file"
-        kubectl get pods --all-namespaces --field-selector=status.phase=Pending --no-headers 2>/dev/null | head -5 | while read -r line; do
-            echo "    - $line" >> "$summary_file"
-        done
+        # Use a temporary variable to avoid pipeline failures
+        local pending_pods_output
+        if pending_pods_output=$(kubectl get pods --all-namespaces --field-selector=status.phase=Pending --no-headers 2>/dev/null); then
+            echo "$pending_pods_output" | head -5 2>/dev/null | while read -r line; do
+                if [[ -n "$line" ]]; then
+                    echo "    - $line" >> "$summary_file"
+                fi
+            done
+        fi
         if [[ $pending_count -gt 5 ]]; then
             echo "    ... and $((pending_count - 5)) more" >> "$summary_file"
         fi
@@ -1520,7 +1648,7 @@ function dump::__generate_cluster_health_summary() {
     
     # Recent autoscaler events
     echo "Recent Cluster Autoscaler Activity:" >> "$summary_file"
-    if [[ -f "${cluster_dir}/cluster-autoscaler-events.yaml" ]]; then
+    if [[ -n "$cluster_dir" && -f "${cluster_dir}/cluster-autoscaler-events.yaml" ]]; then
         local recent_events=$(kubectl get events --all-namespaces --sort-by='.lastTimestamp' 2>/dev/null | grep -i "scaled.*group\|autoscaler" | tail -5)
         if [[ -n "$recent_events" ]]; then
             echo "$recent_events" | while read -r event; do
@@ -1530,13 +1658,13 @@ function dump::__generate_cluster_health_summary() {
             echo "  - Recent events found in file, but not in live query" >> "$summary_file"
         fi
     else
-        echo "  - No recent autoscaler activity" >> "$summary_file"
+        echo "  - No cluster data collected (use --collect-cluster-data=true to include autoscaler info)" >> "$summary_file"
     fi
     echo "" >> "$summary_file"
     
     # Recent Karpenter activity
     echo "Recent Karpenter Activity:" >> "$summary_file"
-    if [[ -f "${cluster_dir}/karpenter-events.yaml" ]]; then
+    if [[ -n "$cluster_dir" && -f "${cluster_dir}/karpenter-events.yaml" ]]; then
         local karpenter_events=$(kubectl get events --all-namespaces --sort-by='.lastTimestamp' 2>/dev/null | grep -i "karpenter\|provisioner\|nodepool\|nodeclaim" | tail -5)
         if [[ -n "$karpenter_events" ]]; then
             echo "$karpenter_events" | while read -r event; do
@@ -1546,25 +1674,31 @@ function dump::__generate_cluster_health_summary() {
             echo "  - Recent events found in file, but not in live query" >> "$summary_file"
         fi
     else
-        echo "  - No recent Karpenter activity" >> "$summary_file"
+        echo "  - No cluster data collected (use --collect-cluster-data=true to include Karpenter info)" >> "$summary_file"
     fi
     echo "" >> "$summary_file"
     
     # Karpenter node provisioning status
-    if kubectl get nodepools.karpenter.sh --no-headers 2>/dev/null | head -3 | while read -r line; do
-        if [[ -n "$line" ]]; then
-            echo "Karpenter NodePools:" >> "$summary_file"
-            echo "  $line" >> "$summary_file"
-        fi
-    done 2>/dev/null; then
+    local karpenter_nodepools_output
+    if karpenter_nodepools_output=$(kubectl get nodepools.karpenter.sh --no-headers 2>/dev/null) && [[ -n "$karpenter_nodepools_output" ]]; then
+        echo "Karpenter NodePools:" >> "$summary_file"
+        echo "$karpenter_nodepools_output" | head -3 2>/dev/null | while read -r line; do
+            if [[ -n "$line" ]]; then
+                echo "  $line" >> "$summary_file"
+            fi
+        done
         echo "" >> "$summary_file"
-    elif kubectl get provisioners.karpenter.sh --no-headers 2>/dev/null | head -3 | while read -r line; do
-        if [[ -n "$line" ]]; then
+    else
+        local karpenter_provisioners_output
+        if karpenter_provisioners_output=$(kubectl get provisioners.karpenter.sh --no-headers 2>/dev/null) && [[ -n "$karpenter_provisioners_output" ]]; then
             echo "Karpenter Provisioners:" >> "$summary_file"
-            echo "  $line" >> "$summary_file"
+            echo "$karpenter_provisioners_output" | head -3 2>/dev/null | while read -r line; do
+                if [[ -n "$line" ]]; then
+                    echo "  $line" >> "$summary_file"
+                fi
+            done
+            echo "" >> "$summary_file"
         fi
-    done 2>/dev/null; then
-        echo "" >> "$summary_file"
     fi
     
     # Resource utilization summary

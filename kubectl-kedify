@@ -19,11 +19,13 @@ if [[ "$0" == *"/.krew/store/"* ]] || [[ "$0" == *"/.krew/bin/"* ]]; then
     DEBUG_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/debug.sh"
     INSIGHTS_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/insights.sh"
     DUMP_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/dump.sh"
+    MC_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/multicluster.sh"
 else
     # Running locally - use local files
     DEBUG_SCRIPT="${DIR}/debug.sh"
     INSIGHTS_SCRIPT="${DIR}/insights.sh"
     DUMP_SCRIPT="${DIR}/dump.sh"
+    MC_SCRIPT="${DIR}/multicluster.sh"
 fi
 
 # Source debug script if it exists
@@ -38,6 +40,13 @@ if [[ -f "${INSIGHTS_SCRIPT}" ]]; then
     source "${INSIGHTS_SCRIPT}"
 else
     echo "Warning: Insights script not found at ${INSIGHTS_SCRIPT}" >&2
+fi
+
+# Source multicluster script if it exists
+if [[ -f "${MC_SCRIPT}" ]]; then
+    source "${MC_SCRIPT}"
+else
+    echo "Warning: Multicluster script not found at ${MC_SCRIPT}" >&2
 fi
 
 # Source dump script if it exists
@@ -65,6 +74,7 @@ main() {
         [[ $2 == ingress ]] || [[ $2 == ing ]] || [[ $2 == i ]] && { autoscale_ing ; exit 0; }
         autoscale ; exit 0
     }
+    [[ $1 == multicluster ]] || [[ $1 == mc ]] && { shift 1 ; multicluster::cmd $@ ; exit 0; }
     [[ $1 == debug ]] || [[ $1 == dbg ]] && { shift 1 ; debug::cmd $@ ; exit 0; }
     [[ $1 == insights ]] || [[ $1 == ins ]] && { shift 1 ; insights::cmd $@ ; exit 0; }
     [[ $1 == dump ]] || [[ $1 == dmp ]] && { shift 1 ; dump::cmd $@ ; exit 0; }
@@ -200,20 +210,21 @@ delete() {
 print_usage() {
     cat << EOF
 
-Usage: kubectl kedify (i)nstall | (d)elete | (s)tatus | (a)utoscale | (dbg)debug | (ins)ights | (dmp)dump | (h)elp
+Usage: kubectl kedify (i)nstall | (d)elete | (s)tatus | (a)utoscale | (mc)multicluster | (dbg)debug | (ins)ights | (dmp)dump | (h)elp
 
 Available commands:
-   install,   i           Installs the Kedify agent
-   delete,    d           Uninstalls the Kedify agent
-   logs,      l           Prints the logs of Kedify agent
-   status,    s           Prints the status of Kedify agent
-   autoscale, a           Runs the interactive mode for creating HTTPScaledObject
-   debug,     dbg         Provides low level information regarding Kedify components
-   insights,  ins         Analyzes ScaledObjects for potential configuration issues
-   dump,      dmp         Collects comprehensive debug information from Kedify/KEDA components
-
-   --version, -v          Prints the version
-   --help,    -h          Shows this help message
+   install,      i     Installs the Kedify agent
+   delete,       d     Uninstalls the Kedify agent
+   logs,         l     Prints the logs of Kedify agent
+   status,       s     Prints the status of Kedify agent
+   autoscale,    a     Runs the interactive mode for creating HTTPScaledObject
+   multicluster, mc    Runs the interactive mode for creating MultiClusterHTTPScaledObject
+   debug,        dbg   Provides low level information regarding Kedify components
+   insights,     ins   Analyzes ScaledObjects for potential configuration issues
+   dump,         dmp   Collects comprehensive debug information from Kedify/KEDA components
+                       
+   --version,    -v    Prints the version
+   --help,       -h    Shows this help message
 
 Examples:
    kubectl kedify install                         ... installs the Kedify agent in interactive mode
@@ -231,7 +242,7 @@ Examples:
    kubectl kedify dump -o /tmp/debug -n myapp     ... collects debug info from specific namespace
 
 Other env vars that can be passed:
-   API                                         ... defaults to https://api.kedify.io
+   API                                            ... defaults to https://api.kedify.io
 
 EOF
 }

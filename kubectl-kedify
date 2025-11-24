@@ -66,18 +66,18 @@ main() {
     export BAT=$(command -v "bat" &> /dev/null && echo "bat" || echo "batcat")
     export KUBECTL=$(command -v "kubecolor" &> /dev/null && echo "kubecolor" || echo "kubectl")
     
-    [[ $1 == install ]] || [[ $1 == i ]]   && { install $@ ; exit 0; }
-    [[ $1 == delete ]] || [[ $1 == d ]]    && { delete $@ ; exit 0; }
+    [[ $1 == install ]] || [[ $1 == i ]]   && { install "$@" ; exit 0; }
+    [[ $1 == delete ]] || [[ $1 == d ]]    && { delete "$@" ; exit 0; }
     [[ $1 == status ]] || [[ $1 == s ]]    && { status ; exit 0; }
-    [[ $1 == logs ]] || [[ $1 == l ]]      && { shift 1 ; logs $@ ; exit 0; }
+    [[ $1 == logs ]] || [[ $1 == l ]]      && { shift 1 ; logs "$@" ; exit 0; }
     [[ $1 == autoscale ]] || [[ $1 == a ]] && {
         [[ $2 == ingress ]] || [[ $2 == ing ]] || [[ $2 == i ]] && { autoscale_ing ; exit 0; }
         autoscale ; exit 0
     }
-    [[ $1 == multicluster ]] || [[ $1 == mc ]] && { shift 1 ; multicluster::cmd $@ ; exit 0; }
-    [[ $1 == debug ]] || [[ $1 == dbg ]] && { shift 1 ; debug::cmd $@ ; exit 0; }
-    [[ $1 == insights ]] || [[ $1 == ins ]] && { shift 1 ; insights::cmd $@ ; exit 0; }
-    [[ $1 == dump ]] || [[ $1 == dmp ]] && { shift 1 ; dump::cmd $@ ; exit 0; }
+    [[ $1 == multicluster ]] || [[ $1 == mc ]] && { shift 1 ; multicluster::cmd "$@" ; exit 0; }
+    [[ $1 == debug ]] || [[ $1 == dbg ]] && { shift 1 ; debug::cmd "$@" ; exit 0; }
+    [[ $1 == insights ]] || [[ $1 == ins ]] && { shift 1 ; insights::cmd "$@" ; exit 0; }
+    [[ $1 == dump ]] || [[ $1 == dmp ]] && { shift 1 ; dump::cmd "$@" ; exit 0; }
     [[ $1 == -v ]] || [[ $1 == --version ]] && { print_version ; exit 0; }
     [[ $1 == -h ]] || [[ $1 == --help ]] && { print_usage ; exit 0; }
     print_usage
@@ -218,11 +218,11 @@ Available commands:
    logs,         l     Prints the logs of Kedify agent
    status,       s     Prints the status of Kedify agent
    autoscale,    a     Runs the interactive mode for creating HTTPScaledObject
-   multicluster, mc    Runs the interactive mode for creating MultiClusterHTTPScaledObject
+   multicluster, mc    Manages multicluster configuration (e.g., setup-member for registering member clusters)
    debug,        dbg   Provides low level information regarding Kedify components
    insights,     ins   Analyzes ScaledObjects for potential configuration issues
    dump,         dmp   Collects comprehensive debug information from Kedify/KEDA components
-                       
+
    --version,    -v    Prints the version
    --help,       -h    Shows this help message
 

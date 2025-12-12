@@ -253,15 +253,12 @@ print_version() {
   } || {
     cat $(dirname `readlink -f $0`)/VERSION
   }
-  if command -v gh &> /dev/null; then
-      echo ""
-      echo "Latest released versions:"
-      echo " - kubectl-kedify: $(gh -R kedify/kubectl-kedify release list --json 'name,publishedAt' | jq -r '. | max_by(.publishedAt) | .name')"
-      gh -R kedify/charts release list --json 'name,publishedAt' | \
-          jq -r 'group_by(.name | split(": ")[0]) | map(max_by(.publishedAt)) | .[] | select(.name) | " - \(.name | split(": ")[0]): \(.name | split(": ")[1])"'
-  else
-      echo "Install GitHub CLI (gh) to see the latest Kedify released version."
-  fi 
+  echo ""
+  echo "Latest released versions:"
+  echo " - kubectl-kedify: $(curl -sL "https://api.github.com/repos/kedify/kubectl-kedify/releases/latest" | jq -r '.tag_name')"
+  curl -sL "https://kedify.github.io/charts/index.yaml" | \
+      yq -r '.entries | to_entries | .[] | " - " + .key + ": " + ( .value | sort_by(.created) | .[-1] | .version )' | \
+      grep -v 'external-scaler-azure-cosmos-db'
 }
 
 cleanup() {

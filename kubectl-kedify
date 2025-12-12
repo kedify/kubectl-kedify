@@ -253,6 +253,12 @@ print_version() {
   } || {
     cat $(dirname `readlink -f $0`)/VERSION
   }
+  echo ""
+  echo "Latest released versions:"
+  echo " - kubectl-kedify: $(curl -sL "https://api.github.com/repos/kedify/kubectl-kedify/releases/latest" | jq -r '.tag_name')"
+  curl -sL "https://kedify.github.io/charts/index.yaml" | \
+      yq -r '.entries | to_entries | .[] | " - " + .key + ": " + ( .value | sort_by(.created) | .[-1] | .version )' | \
+      grep -v 'external-scaler-azure-cosmos-db'
 }
 
 cleanup() {

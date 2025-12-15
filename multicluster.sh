@@ -242,17 +242,34 @@ rules:
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 EOF
     kubectl --context="${member_context}" create clusterrolebinding kedify-agent --clusterrole=kedify-agent --serviceaccount="${namespace}":kedify-agent --dry-run=client -o yaml | kubectl --context="${member_context}" apply -f -
-    kubectl --context="${member_context}" patch sa kedify-agent -n "${namespace}" -p '{"secrets":[{"name":"kedify-agent-token"}]}'
-
-    # create kubeconfig for the member cluster to be used by kedify-agent in KEDA cluster
+    # Retrieve the CA certificate and token from the member cluster
     ca=$(kubectl --context="${member_context}" get secret kedify-agent-token -n "${namespace}" -o jsonpath="{.data['ca\.crt']}")
     if [[ -z "$ca" ]]; then
         echo "Failed to retrieve CA certificate from member cluster. Ensure that the ServiceAccount and Secret are set up correctly."
         exit 1
     fi
-    token=$(kubectl --context="${member_context}" get secret kedify-agent-token -n "${namespace}" -o jsonpath="{.data['token']}" | base64 --decode)
+    # Wait for the token to be populated in the secret
+    local retries=5
+    local wait_time=2
+    local token=""
+
+    for ((attempt=1; attempt<=retries; attempt++)); do
+        local raw=""
+        if raw=$(kubectl --context="${member_context}" get secret kedify-agent-token -n "${namespace}" -o jsonpath="{.data['token']}" | base64 --decode); then
+            if [[ -n "$raw" ]]; then
+                token="$raw"
+                break
+            fi
+        else
+            raw=""
+        fi
+        if (( attempt < retries )); then
+            echo "Token not yet available in member cluster secret, retrying in $wait_time seconds... (Attempt: $attempt/$retries)"
+            sleep $wait_time
+        fi
+    done
     if [[ -z "$token" ]]; then
-        echo "Failed to retrieve token from member cluster. Ensure that the ServiceAccount and Secret are set up correctly."
+        echo "Failed to retrieve token from member cluster after $retries attempts. Ensure that the ServiceAccount and Secret are set up correctly."
         exit 1
     fi
     if [[ -n "$member_api_url" ]]; then
@@ -278,6 +295,8 @@ EOF
     temp_kubeconfig=$(mktemp /tmp/kedify-agent-${member_name}-kubeconfig.XXXXXX)
     chmod 600 "$temp_kubeconfig"
     trap "rm -f '$temp_kubeconfig'" EXIT
+    
+    # Create kubeconfig for the member cluster to be used by kedify-agent in KEDA cluster
     cat <<EOF > "$temp_kubeconfig"
 apiVersion: v1
 kind: Config

@@ -261,7 +261,7 @@ EOF
                 break
             fi
         else
-            raw=""
+            :
         fi
         if (( attempt < retries )); then
             echo "Token not yet available in member cluster secret, retrying in $wait_time seconds... (Attempt: $attempt/$retries)"
@@ -295,7 +295,7 @@ EOF
     temp_kubeconfig=$(mktemp /tmp/kedify-agent-${member_name}-kubeconfig.XXXXXX)
     chmod 600 "$temp_kubeconfig"
     trap "rm -f '$temp_kubeconfig'" EXIT
-    
+
     # Create kubeconfig for the member cluster to be used by kedify-agent in KEDA cluster
     cat <<EOF > "$temp_kubeconfig"
 apiVersion: v1

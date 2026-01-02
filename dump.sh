@@ -530,7 +530,158 @@ function dump::__collect_namespace_data() {
         pids=()  # Clear the pids array
         sleep 1  # Brief pause to ensure cleanup is complete
     fi
+
+    # Get kedify-predictor pods and collect their data
+    local predictor_pods
+    IFS=$'\n' read -d '' -r -a predictor_pods < <(kubectl get pods -n "$ns" -l app=kedify-predictor -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' && printf '\0')
     
+    if [[ ${#predictor_pods[@]} -gt 0 ]]; then
+        dump::__print_status "\033[36mCollecting kedify-predictor data...\033[0m"
+        dump::__print_status "  \033[90mFound ${#predictor_pods[@]} kedify-predictor pod(s)\033[0m"
+        
+        for pod in "${predictor_pods[@]}"; do
+            dump::__print_status "  \033[36m- Collecting data from:\033[0m $pod"
+            
+            # Pod manifest and description
+            kubectl get pod -n "$ns" "$pod" -o yaml > "${ns_dir}/kedify-predictor-${pod}-pod.yaml" 2>/dev/null || dump::__print_status "    \033[31mFailed to get pod YAML for $pod\033[0m"
+            kubectl describe pod -n "$ns" "$pod" > "${ns_dir}/kedify-predictor-${pod}-pod.describe.txt" 2>/dev/null || dump::__print_status "    \033[31mFailed to describe pod $pod\033[0m"
+            
+            # Pod logs for all containers
+            kubectl logs -n "$ns" "$pod" -c prediction-controller > "${ns_dir}/kedify-predictor-${pod}-prediction-controller-logs.txt" 2>/dev/null || dump::__print_status "    \033[31mFailed to get prediction-controller logs for $pod\033[0m"
+            kubectl logs -n "$ns" "$pod" -c keda-prophet > "${ns_dir}/kedify-predictor-${pod}-keda-prophet-logs.txt" 2>/dev/null || dump::__print_status "    \033[31mFailed to get keda-prophet logs for $pod\033[0m"
+            
+            # Previous logs if pod has restarted
+            kubectl logs -n "$ns" "$pod" -c prediction-controller --previous > "${ns_dir}/kedify-predictor-${pod}-prediction-controller-logs-previous.txt" 2>/dev/null || true
+            kubectl logs -n "$ns" "$pod" -c keda-prophet --previous > "${ns_dir}/kedify-predictor-${pod}-keda-prophet-logs-previous.txt" 2>/dev/null || true
+        done
+        
+        # Collect predictor service and related resources
+        dump::__print_status "  \033[36m- Collecting kedify-predictor service and related resources...\033[0m"
+        
+        # Service
+        if kubectl get service kedify-predictor -n "$ns" >/dev/null 2>&1; then
+            kubectl get service kedify-predictor -n "$ns" -o yaml > "${ns_dir}/kedify-predictor-service.yaml" 2>/dev/null
+            dump::__print_status "    \033[32m✓ Predictor service collected\033[0m"
+        else
+            dump::__print_status "    \033[90m- No predictor service found\033[0m"
+        fi
+        
+        # ServiceAccount
+        if kubectl get serviceaccount kedify-predictor -n "$ns" >/dev/null 2>&1; then
+            kubectl get serviceaccount kedify-predictor -n "$ns" -o yaml > "${ns_dir}/kedify-predictor-serviceaccount.yaml" 2>/dev/null
+            dump::__print_status "    \033[32m✓ Predictor serviceaccount collected\033[0m"
+        else
+            dump::__print_status "    \033[90m- No predictor serviceaccount found\033[0m"
+        fi
+        
+        # Secrets
+        if kubectl get secret kedify-predictor-env -n "$ns" >/dev/null 2>&1; then
+            kubectl get secret kedify-predictor-env -n "$ns" -o yaml > "${ns_dir}/kedify-predictor-secret.yaml" 2>/dev/null
+            dump::__print_status "    \033[32m✓ Predictor secret collected\033[0m"
+        else
+            dump::__print_status "    \033[90m- No predictor secret found\033[0m"
+        fi
+        
+        # PersistentVolumeClaims
+        local predictor_pvcs=("prophet-sqlite" "prophet-models")
+        for pvc_name in "${predictor_pvcs[@]}"; do
+            if kubectl get pvc "$pvc_name" -n "$ns" >/dev/null 2>&1; then
+                kubectl get pvc "$pvc_name" -n "$ns" -o yaml > "${ns_dir}/kedify-predictor-${pvc_name}-pvc.yaml" 2>/dev/null
+                dump::__print_status "    \033[32m✓ Predictor PVC '$pvc_name' collected\033[0m"
+            else
+                dump::__print_status "    \033[90m- No predictor PVC '$pvc_name' found\033[0m"
+            fi
+        done
+        
+        # Deployment
+        if kubectl get deployment kedify-predictor -n "$ns" >/dev/null 2>&1; then
+            kubectl get deployment kedify-predictor -n "$ns" -o yaml > "${ns_dir}/kedify-predictor-deployment.yaml" 2>/dev/null
+            dump::__print_status "    \033[32m✓ Predictor deployment collected\033[0m"
+        else
+            dump::__print_status "    \033[90m- No predictor deployment found\033[0m"
+        fi
+        
+        # Collect metrics from predictor pods (port 8081 for internal metrics, 8000 for keda-prophet)
+        dump::__print_status "  \033[36m- Collecting predictor metrics and models...\033[0m"
+        
+        # Set up port forwards for all pods (following kedify-proxy pattern)
+        set +m
+        local predictor_pids=()
+        local predictor_ports=()
+        local base_metrics_port=18081
+        local base_models_port=18000
+        
+        for i in "${!predictor_pods[@]}"; do
+            local pod="${predictor_pods[$i]}"
+            local metrics_port=$((base_metrics_port + i))
+            local models_port=$((base_models_port + i))
+            
+            # Set up port forwards
+            kubectl port-forward -n "$ns" "$pod" $metrics_port:8081 >/dev/null 2>&1 &
+            predictor_pids+=($!)
+            kubectl port-forward -n "$ns" "$pod" $models_port:8000 >/dev/null 2>&1 &
+            predictor_pids+=($!)
+            
+            predictor_ports+=("$metrics_port:$models_port")
+        done
+        
+        # Wait for port forwards to be ready with verification
+        sleep 3
+        local ready_count=0
+        for i in {1..5}; do
+            ready_count=0
+            for port_pair in "${predictor_ports[@]}"; do
+                local metrics_port="${port_pair%:*}"
+                if curl -s --max-time 1 "http://localhost:${metrics_port}/metrics" >/dev/null 2>&1; then
+                    ready_count=$((ready_count + 1))
+                fi
+            done
+            if [[ $ready_count -eq ${#predictor_pods[@]} ]]; then
+                break
+            fi
+            sleep 1
+        done
+        
+        # Collect data from each predictor pod
+        for i in "${!predictor_pods[@]}"; do
+            local pod="${predictor_pods[$i]}"
+            local port_pair="${predictor_ports[$i]}"
+            local metrics_port="${port_pair%:*}"
+            local models_port="${port_pair#*:}"
+            
+            dump::__print_status "    \033[36m- Collecting data from:\033[0m $pod"
+            
+            # Try to collect metrics
+            if curl -s --max-time 5 "http://localhost:${metrics_port}/metrics" -o "${ns_dir}/kedify-predictor-${pod}-metrics.txt" 2>/dev/null; then
+                dump::__print_status "      \033[32m✓ Metrics collected\033[0m"
+            else
+                dump::__print_status "      \033[31m✗ Failed to collect metrics\033[0m"
+            fi
+            
+            # Try to collect models list
+            if curl -s --max-time 5 "http://localhost:${models_port}/models" -o "${ns_dir}/kedify-predictor-${pod}-models.json" 2>/dev/null; then
+                dump::__print_status "      \033[32m✓ Models list collected\033[0m"
+            else
+                dump::__print_status "      \033[31m✗ Failed to collect models list\033[0m"
+            fi
+        done
+        
+        # Cleanup port forwards
+        for pid in "${predictor_pids[@]}"; do
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        done
+        set -m 2>/dev/null || true
+        
+        # Collect resource usage for all kedify-predictor pods in this namespace
+        dump::__print_status "  \033[36m- Collecting resource usage for kedify-predictor pods...\033[0m"
+        if kubectl top pod -n "$ns" -l app=kedify-predictor --no-headers 2>/dev/null > "${ns_dir}/kedify-predictor-pods-resource-usage.txt"; then
+            dump::__print_status "    \033[32m✓ Resource usage collected\033[0m"
+        else
+            dump::__print_status "    \033[31m✗ Failed to get resource usage (metrics-server may not be available)\033[0m"
+        fi
+    fi
+
     # Collect ScaledObjects, HPAs, ScaledJobs, HTTPScaledObjects, and Kedify resources from this namespace
     dump::__print_status "\033[36mCollecting scaling resources...\033[0m"
     
@@ -683,6 +834,19 @@ function dump::__collect_namespace_data() {
         dump::__print_status "  \033[90m- ScalingPolicies CRD not available (Kedify not installed)\033[0m"
     fi
     
+    # MetricPredictors (only if CRD exists and predictor is installed)
+    if kubectl get crd metricpredictors.keda.kedify.io >/dev/null 2>&1; then
+        local mp_check=$(kubectl get metricpredictors -n "$ns" --no-headers 2>/dev/null)
+        if [[ -n "$mp_check" ]]; then
+            kubectl get metricpredictors -n "$ns" -o yaml > "${ns_dir}/metricpredictors.yaml" 2>/dev/null
+            dump::__print_status "  \033[32m✓ MetricPredictors collected\033[0m"
+        else
+            dump::__print_status "  \033[90m- No MetricPredictors found\033[0m"
+        fi
+    else
+        dump::__print_status "  \033[90m- MetricPredictors CRD not available (Kedify Predictor not installed)\033[0m"
+    fi
+    
     # Collect Kedify OTel Add-on data if available (can be installed per namespace)
     dump::__print_status "\033[36mCollecting Kedify OTel Add-on data...\033[0m"
     
@@ -732,6 +896,20 @@ function dump::__collect_namespace_data() {
             dump::__print_status "    \033[32m✓ OTel scaler memstore data collected\033[0m"
         else
             dump::__print_status "    \033[31m✗ Failed to collect OTel scaler memstore data\033[0m"
+        fi
+        
+        # Collect memstore metric names
+        if curl -s --max-time 10 "http://localhost:9090/memstore/names" -o "${ns_dir}/kedify-otel-scaler-metric-names.json" 2>/dev/null; then
+            dump::__print_status "    \033[32m✓ OTel scaler metric names collected\033[0m"
+        else
+            dump::__print_status "    \033[31m✗ Failed to collect OTel scaler metric names\033[0m"
+        fi
+        
+        # Collect app info
+        if curl -s --max-time 10 "http://localhost:9090/info" -o "${ns_dir}/kedify-otel-scaler-info.json" 2>/dev/null; then
+            dump::__print_status "    \033[32m✓ OTel scaler app info collected\033[0m"
+        else
+            dump::__print_status "    \033[31m✗ Failed to collect OTel scaler app info\033[0m"
         fi
         
         # Cleanup OTel port forwards
@@ -948,16 +1126,32 @@ Per-namespace Files:
 - podresourceprofiles.yaml                ... PodResourceProfile resources (if any)
 - scalinggroups.yaml                      ... ScalingGroup resources (if any)
 - scalingpolicies.yaml                    ... ScalingPolicy resources (if any)
+- metricpredictors.yaml                   ... MetricPredictor resources (if any)
 - kedify-proxy-*-pod.yaml                 ... Pod manifests for kedify-proxy pods
 - kedify-proxy-*-logs.txt                 ... Logs from kedify-proxy pods
 - kedify-proxy-*-config_dump.json         ... Envoy configuration dumps
 - kedify-proxy-*-prometheus.txt           ... Prometheus metrics from kedify-proxy
+- kedify-predictor-{pod}-pod.yaml          ... Pod manifests for kedify-predictor pods
+- kedify-predictor-{pod}-pod.describe.txt   ... Detailed pod descriptions for kedify-predictor pods
+- kedify-predictor-{pod}-{container}-logs.txt ... Current logs from kedify-predictor containers (prediction-controller, keda-prophet)
+- kedify-predictor-{pod}-{container}-logs-previous.txt ... Previous logs from kedify-predictor containers (if restarted)
+- kedify-predictor-{pod}-metrics.txt        ... Prometheus metrics from kedify-predictor internal endpoint
+- kedify-predictor-{pod}-models.json        ... Models list from kedify-predictor keda-prophet API
+- kedify-predictor-service.yaml           ... Predictor service configuration
+- kedify-predictor-deployment.yaml        ... Predictor deployment configuration
+- kedify-predictor-serviceaccount.yaml    ... Predictor serviceaccount configuration
+- kedify-predictor-secret.yaml            ... Predictor secrets (kedify-predictor-env)
+- kedify-predictor-*-pvc.yaml             ... Predictor PersistentVolumeClaims (prophet-sqlite, prophet-models)
 
 Installation namespace additional files:
 - kedify-resource.yaml                    ... KedifyConfiguration resource (if any)
 - helm-kedify-agent-values.yaml           ... Kedify Helm values used during installation (if available)
 - helm-kedify-agent-info.txt              ... Kedify Helm version information (if available)
 - helm-*-values.yaml                      ... Additional Helm values files (KEDA, HTTP Add-on, etc.)
+- kedify-otel-scaler-metrics.txt          ... OTel scaler Prometheus metrics (if OTel add-on installed)
+- kedify-otel-scaler-memstore.json        ... OTel scaler detailed metrics data (if OTel add-on installed)
+- kedify-otel-scaler-metric-names.json    ... OTel scaler tracked metric names (if OTel add-on installed)
+- kedify-otel-scaler-info.json            ... OTel scaler app version/config info (if OTel add-on installed)
 - http-addon-queue-*.txt                  ... HTTP Add-on queue data in table format
 - http-addon-queue.json                   ... HTTP Add-on queue data in JSON format
 
@@ -1503,6 +1697,7 @@ function dump::cmd() {
         # For non-installation namespaces, check if they have relevant resources
         if [[ "$is_installation" == "false" ]]; then
             local has_proxy=$(kubectl get pods -n "$ns" -l app=kedify-proxy --no-headers 2>/dev/null | wc -l || echo "0")
+            local has_predictor=$(kubectl get pods -n "$ns" -l app=kedify-predictor --no-headers 2>/dev/null | wc -l || echo "0")
             local has_so=0
             local has_hpa=0
             local has_sj=0
@@ -1527,7 +1722,7 @@ function dump::cmd() {
             fi
             
             # Skip if no relevant resources
-            if [[ "$has_proxy" -eq 0 && "$has_so" -eq 0 && "$has_hpa" -eq 0 && "$has_sj" -eq 0 && "$has_hso" -eq 0 ]]; then
+            if [[ "$has_proxy" -eq 0 && "$has_predictor" -eq 0 && "$has_so" -eq 0 && "$has_hpa" -eq 0 && "$has_sj" -eq 0 && "$has_hso" -eq 0 ]]; then
                 continue
             fi
         fi

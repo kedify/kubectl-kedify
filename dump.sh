@@ -977,8 +977,10 @@ function dump::__collect_namespace_data() {
         local helm_secrets_found=false
         
         # Check for kedify-agent Helm release secret
-        if kubectl get secret -n "$ns" sh.helm.release.v1.kedify-agent.v1 >/dev/null 2>&1; then
-            if dump::__extract_helm_release_data "$ns" "sh.helm.release.v1.kedify-agent.v1" "$ns_dir" "helm-kedify-agent-"; then
+        local _latest_agent_helm_revision
+        _latest_agent_helm_revision=$(kubectl get secrets -n "$ns" --no-headers -o custom-columns=":metadata.name" | grep "sh.helm.release.v1.kedify-agent" | sort --version-sort | tail -1)
+        if [[ -n "$_latest_agent_helm_revision" ]] && kubectl get secret -n "$ns" "$_latest_agent_helm_revision" >/dev/null 2>&1; then
+            if dump::__extract_helm_release_data "$ns" "$_latest_agent_helm_revision" "$ns_dir" "helm-kedify-agent-"; then
                 helm_secrets_found=true
             fi
         fi
@@ -1933,8 +1935,16 @@ function dump::__extract_helm_release_data() {
         local temp_release=$(mktemp)
         
         if echo "$helm_data" | base64 -d | base64 -d | gunzip 2>/dev/null > "$temp_release"; then
+            # Extract default values and convert to YAML
+            if jq -r '.chart.values // empty' "$temp_release" 2>/dev/null | yq -P > "${output_dir}/${file_prefix}${safe_name}-default-values.yaml" 2>/dev/null && [[ -s "${output_dir}/${file_prefix}${safe_name}-default-values.yaml" ]]; then
+                dump::__print_status "    \033[32m✓ Helm default values extracted for $secret_name\033[0m"
+            else
+                rm -f "${output_dir}/${file_prefix}${safe_name}-default-values.yaml"
+                dump::__print_status "    \033[90m- No default Helm values found in release data for $secret_name\033[0m"
+            fi
+
             # Extract values and convert to YAML
-            if jq -r '.chart.values // empty' "$temp_release" 2>/dev/null | yq -P > "${output_dir}/${file_prefix}${safe_name}-values.yaml" 2>/dev/null && [[ -s "${output_dir}/${file_prefix}${safe_name}-values.yaml" ]]; then
+            if jq -r '.config // empty' "$temp_release" 2>/dev/null | yq -P > "${output_dir}/${file_prefix}${safe_name}-values.yaml" 2>/dev/null && [[ -s "${output_dir}/${file_prefix}${safe_name}-values.yaml" ]]; then
                 dump::__print_status "    \033[32m✓ Helm values extracted for $secret_name\033[0m"
             else
                 rm -f "${output_dir}/${file_prefix}${safe_name}-values.yaml"

@@ -41,4 +41,6 @@ spec:
           to: "."
         - from: "kubectl-kedify-*/debug.sh"
           to: "."
+        - from: "kubectl-kedify-*/multicluster.sh"
+          to: "."
       bin: kubectl-kedify

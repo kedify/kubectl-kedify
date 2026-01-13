@@ -977,6 +977,7 @@ function dump::__collect_namespace_data() {
         local helm_secrets_found=false
         
         # Check for kedify-agent Helm release secret
+        local _latest_agent_helm_revision
         _latest_agent_helm_revision=$(kubectl get secrets -n "$ns" --no-headers -o custom-columns=":metadata.name" | grep "sh.helm.release.v1.kedify-agent" | sort --version-sort | tail -1)
         if kubectl get secret -n "$ns" "$_latest_agent_helm_revision" >/dev/null 2>&1; then
             if dump::__extract_helm_release_data "$ns" "$_latest_agent_helm_revision" "$ns_dir" "helm-kedify-agent-"; then

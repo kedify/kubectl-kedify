@@ -38,10 +38,11 @@ EOF
 
 function multicluster::__print_usage_list_members() {
     cat <<EOF
-Usage: multicluster list-members [--namespace <namespace>]
+Usage: multicluster list-members [--namespace <namespace>] [--output <output>]
 Options:
   --namespace         Namespace where KEDA is deployed in the KEDA cluster (optional, default: keda)
   --keda-context      Context name for the KEDA cluster (optional)
+  --output, -o        Output format. Supported values: table, wide (optional, default: table)
 EOF
 }
 
@@ -58,6 +59,7 @@ EOF
 function multicluster::__list_members() {
     local namespace="keda"
     local keda_context=""
+    local output_format="table"
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -69,6 +71,10 @@ function multicluster::__list_members() {
                 keda_context=$2
                 shift 2
                 ;;
+            --output|-o)
+                output_format=$2
+                shift 2
+                ;;
             *)
                 echo "Unknown option: $1"
                 multicluster::__print_usage_list_members
@@ -77,11 +83,67 @@ function multicluster::__list_members() {
         esac
     done
 
+    if [[ "${output_format}" != "table" && "${output_format}" != "wide" ]]; then
+        echo "Unknown output format: ${output_format}. Supported values: table, wide"
+        exit 1
+    fi
+
     if ! kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs > /dev/null 2>&1; then
         echo "No member clusters are configured in KEDA cluster, secret 'kedify-agent-multicluster-kubeconfigs' not found."
         exit 1
     fi
-    kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs -o jsonpath="{.data}" | jq -r 'keys[]' | sed 's/-cluster.kubeconfig//'
+
+    local members=()
+    mapfile -t members < <(
+        kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs -o jsonpath="{.data}" |
+            jq -r 'keys[] | sub("-cluster\\.kubeconfig$"; "")'
+    )
+
+    local multi_cluster_status="{}"
+    local kedify_config_json
+    if kedify_config_json=$(kubectl -n "${namespace}" --context="${keda_context}" get kedifyconfigurations -o json 2>/dev/null); then
+        multi_cluster_status=$(echo "${kedify_config_json}" | jq -c '.items | map(select(.status.multiClusterStatus.clusters != null) | .status.multiClusterStatus.clusters) | first // {}')
+    fi
+
+    local member
+    local states=()
+    local infos=()
+    local cluster_width=7
+    local state_width=5
+
+    for member in "${members[@]}"; do
+        local state
+        local info
+        state=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].state // "Unknown"')
+        info=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].info // "missing status information"')
+        states+=("${state}")
+        infos+=("${info}")
+
+        if (( ${#member} > cluster_width )); then
+            cluster_width=${#member}
+        fi
+        if (( ${#state} > state_width )); then
+            state_width=${#state}
+        fi
+    done
+
+    if [[ "${output_format}" == "wide" ]]; then
+        printf "%-${cluster_width}s  %-${state_width}s  %s\n" "CLUSTER" "STATE" "INFO"
+    else
+        printf "%-${cluster_width}s  %s\n" "CLUSTER" "STATE"
+    fi
+
+    local idx
+    for idx in "${!members[@]}"; do
+        member=${members[$idx]}
+        local state="${states[$idx]}"
+        local info="${infos[$idx]}"
+        if [[ "${output_format}" == "wide" ]]; then
+            printf "%-${cluster_width}s  %-${state_width}s  %s\n" "${member}" "${state}" "${info}"
+        else
+            printf "%-${cluster_width}s  %s\n" "${member}" "${state}"
+        fi
+    done
 }
 
 function multicluster::__delete_member() {

@@ -152,6 +152,11 @@ function multicluster::__setup_member() {
     local member_api_url=""
     local auto_confirm="false"
 
+    if [[ $# -eq 0 ]]; then
+        echo "Member name is required for setup-member command."
+        multicluster::__print_usage_setup_member
+        exit 1
+    fi
     member_name=$1
     shift
     if [[ -z "${member_name}" ]]; then

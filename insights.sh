@@ -2,12 +2,29 @@
 
 # insights.sh - ScaledObject analysis and insights functionality for kubectl-kedify
 
-set -euo pipefail
-
 # Initialize global variables for problem tracking
 insights_all_problems=""
 insights_problem_resources_count=0
 insights_total_problems_count=0
+
+function insights::__failure() {
+    local lineno=$1
+    local msg=$2
+    echo "Failed at $lineno: $msg"
+}
+
+function insights::__configure_shell() {
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+        emulate -L ksh
+        setopt typeset_silent
+    fi
+
+    set -euo pipefail
+    if [[ -n "${BASH_VERSION:-}" ]]; then
+        set -E
+        trap 'insights::__failure ${LINENO} "$BASH_COMMAND"' ERR
+    fi
+}
 
 # Helper function to add problems
 function insights::__add_problem() {
@@ -40,9 +57,12 @@ function insights::__check_polling_interval_with_min_replicas() {
     local so_namespace="$3"
     local all_namespaces="$4"
     
-    local min_replicas=$(echo "$so_json" | jq -r '.spec.minReplicaCount // 0')
-    local idle_replicas=$(echo "$so_json" | jq -r '.spec.idleReplicaCount // "null"')
-    local polling_interval=$(echo "$so_json" | jq -r '.spec.pollingInterval // 30')
+    local min_replicas=""
+    local idle_replicas=""
+    local polling_interval=""
+    min_replicas=$(echo "$so_json" | jq -r '.spec.minReplicaCount // 0')
+    idle_replicas=$(echo "$so_json" | jq -r '.spec.idleReplicaCount // "null"')
+    polling_interval=$(echo "$so_json" | jq -r '.spec.pollingInterval // 30')
     
     # Check for polling interval issue - ensure min_replicas is numeric and > 0
     if [[ "$min_replicas" =~ ^[0-9]+$ && "$min_replicas" -gt 0 ]]; then
@@ -86,7 +106,8 @@ function insights::__check_low_polling_interval() {
     local so_namespace="$3"
     local all_namespaces="$4"
     
-    local polling_interval=$(echo "$so_json" | jq -r '.spec.pollingInterval // "null"')
+    local polling_interval=""
+    polling_interval=$(echo "$so_json" | jq -r '.spec.pollingInterval // "null"')
     
     # Only check if pollingInterval is explicitly set and is numeric
     if [[ "$polling_interval" != "null" && "$polling_interval" =~ ^[0-9]+$ && "$polling_interval" -le 10 ]]; then
@@ -109,7 +130,8 @@ function insights::__check_missing_fallback() {
     local all_namespaces="$4"
     
     # Check if fallback section exists
-    local has_fallback=$(echo "$so_json" | jq -r '.spec.fallback // "null"')
+    local has_fallback=""
+    has_fallback=$(echo "$so_json" | jq -r '.spec.fallback // "null"')
     if [[ "$has_fallback" != "null" ]]; then
         # Fallback is already configured, skip check
         return
@@ -119,8 +141,10 @@ function insights::__check_missing_fallback() {
     local has_supported_triggers=false
     
     while IFS= read -r trigger; do
-        local trigger_type=$(echo "$trigger" | jq -r '.type')
-        local metric_type=$(echo "$trigger" | jq -r '.metricType // "AverageValue"')
+        local trigger_type=""
+        local metric_type=""
+        trigger_type=$(echo "$trigger" | jq -r '.type')
+        metric_type=$(echo "$trigger" | jq -r '.metricType // "AverageValue"')
         
         # Skip CPU and memory scalers (not supported for fallback)
         if [[ "$trigger_type" == "cpu" || "$trigger_type" == "memory" ]]; then
@@ -179,9 +203,13 @@ EOF
 }
 
 # Main insights command handler
-function insights::cmd() {
+function insights::__cmd_impl() {
     local namespace=""
     local all_namespaces=false
+
+    insights_all_problems=""
+    insights_problem_resources_count=0
+    insights_total_problems_count=0
     
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -233,6 +261,11 @@ function insights::cmd() {
     insights::__analyze "$namespace" "$all_namespaces" "$kubectl_cmd"
 }
 
+function insights::cmd() (
+    insights::__configure_shell
+    insights::__cmd_impl "$@"
+)
+
 # Main analysis function
 function insights::__analyze() {
     local namespace="$1"
@@ -271,7 +304,8 @@ function insights::__analyze() {
         exit 1
     }
     
-    local total_count=$(echo "$scaledobjects_json" | jq -r '.items | length')
+    local total_count=""
+    total_count=$(echo "$scaledobjects_json" | jq -r '.items | length')
     if [[ "$total_count" == "0" ]]; then
         printf "\r\033[2K"
         echo "No ScaledObjects found in $scope_msg."
@@ -284,8 +318,10 @@ function insights::__analyze() {
     
     # Analyze each ScaledObject
     while IFS= read -r so_json; do
-        local so_name=$(echo "$so_json" | jq -r '.metadata.name')
-        local so_namespace=$(echo "$so_json" | jq -r '.metadata.namespace')
+        local so_name=""
+        local so_namespace=""
+        so_name=$(echo "$so_json" | jq -r '.metadata.name')
+        so_namespace=$(echo "$so_json" | jq -r '.metadata.namespace')
         
         # Run all checks
         insights::__check_polling_interval_with_min_replicas "$so_json" "$so_name" "$so_namespace" "$all_namespaces"

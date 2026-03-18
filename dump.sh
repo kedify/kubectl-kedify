@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
-set -Eo functrace
-
 # Global variable for quiet mode
 QUIET_MODE="false"
 
@@ -14,7 +11,40 @@ function dump::__failure() {
     local msg=$2
     echo "Failed at $lineno: $msg"
 }
-trap 'dump::__failure ${LINENO} "$BASH_COMMAND"' ERR
+
+function dump::__configure_shell() {
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+        emulate -L ksh
+        setopt typeset_silent
+    fi
+
+    set -euo pipefail
+    if [[ -n "${BASH_VERSION:-}" ]]; then
+        set -E
+        trap 'dump::__failure ${LINENO} "$BASH_COMMAND"' ERR
+    fi
+}
+
+function dump::__read_lines_into_array() {
+    local array_name="$1"
+    local line=""
+
+    eval "$array_name=()"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" ]] && continue
+        eval "$array_name+=(\"\$line\")"
+    done
+}
+
+function dump::__kubectl_count() {
+    local count="0"
+
+    if count=$(kubectl "$@" --no-headers 2>/dev/null | wc -l | awk '{print $1}'); then
+        printf '%s\n' "$count"
+    else
+        echo "0"
+    fi
+}
 
 function dump::__print_status() {
     if [[ "$QUIET_MODE" != "true" ]]; then
@@ -181,7 +211,7 @@ function dump::__aggregate_interceptor_queue() {
             cmd="yq e -P"
             ;;
         *)
-            cmd="$(dump::__addon_queue_structured_output $mode) | column -t -s $'\t'"
+            cmd="$(dump::__addon_queue_structured_output "$mode") | column -t -s $'\t'"
             ;;            
     esac
     jq -n --arg mode "$mode" '
@@ -284,7 +314,7 @@ function dump::__collect_http_addon_queue_data() {
         
         # Get interceptor pods
         local interceptor_pods
-        IFS=$'\n' read -d '' -r -a interceptor_pods < <(kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' && printf '\0')
+        dump::__read_lines_into_array interceptor_pods < <(kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n')
         
         if [[ ${#interceptor_pods[@]} -gt 0 ]]; then
             # Set up port forwards for interceptor pods (they typically expose metrics on port 9090)
@@ -295,8 +325,9 @@ function dump::__collect_http_addon_queue_data() {
             for pod in "${interceptor_pods[@]}"; do
                 local_port=$((local_port + 1))
                 # Try common HTTP add-on interceptor ports: 9090 (metrics), 8080 (main), 9091 (admin)
-                local pod_ports=$(kubectl get pod -n "$ns" "$pod" -o jsonpath='{.spec.containers[*].ports[*].containerPort}' 2>/dev/null)
+                local pod_ports=""
                 local target_port=""
+                pod_ports=$(kubectl get pod -n "$ns" "$pod" -o jsonpath='{.spec.containers[*].ports[*].containerPort}' 2>/dev/null)
                 
                 # Check if pod has port 9090 (metrics/queue endpoint)
                 if echo "$pod_ports" | grep -q "9090"; then
@@ -358,7 +389,7 @@ function dump::__collect_http_addon_queue_data() {
                                 continue
                             else
                                 # We got queue data, format it as JSON for processing
-                                queue_json_data+=$(echo "$queue_data" | jq -r '. | {name: "'$pod'", queue: .}')$'\n'
+                                queue_json_data+=$(echo "$queue_data" | jq -r --arg pod "$pod" '. | {name: $pod, queue: .}')$'\n'
                                 break
                             fi
                         fi
@@ -456,7 +487,7 @@ function dump::__collect_namespace_data() {
     
     # Get kedify-proxy pods and collect their data
     local pods
-    IFS=$'\n' read -d '' -r -a pods < <(kubectl get pods -n "$ns" -l app=kedify-proxy -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' && printf '\0')
+    dump::__read_lines_into_array pods < <(kubectl get pods -n "$ns" -l app=kedify-proxy -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n')
     
     if [[ ${#pods[@]} -gt 0 ]]; then
         dump::__print_status "\033[36mCollecting kedify-proxy data...\033[0m"
@@ -533,7 +564,7 @@ function dump::__collect_namespace_data() {
 
     # Get kedify-predictor pods and collect their data
     local predictor_pods
-    IFS=$'\n' read -d '' -r -a predictor_pods < <(kubectl get pods -n "$ns" -l app=kedify-predictor -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' && printf '\0')
+    dump::__read_lines_into_array predictor_pods < <(kubectl get pods -n "$ns" -l app=kedify-predictor -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n')
     
     if [[ ${#predictor_pods[@]} -gt 0 ]]; then
         dump::__print_status "\033[36mCollecting kedify-predictor data...\033[0m"
@@ -610,11 +641,11 @@ function dump::__collect_namespace_data() {
         local predictor_ports=()
         local base_metrics_port=18081
         local base_models_port=18000
+        local predictor_index=0
         
-        for i in "${!predictor_pods[@]}"; do
-            local pod="${predictor_pods[$i]}"
-            local metrics_port=$((base_metrics_port + i))
-            local models_port=$((base_models_port + i))
+        for pod in "${predictor_pods[@]}"; do
+            local metrics_port=$((base_metrics_port + predictor_index))
+            local models_port=$((base_models_port + predictor_index))
             
             # Set up port forwards
             kubectl port-forward -n "$ns" "$pod" $metrics_port:8081 >/dev/null 2>&1 &
@@ -623,6 +654,7 @@ function dump::__collect_namespace_data() {
             predictor_pids+=($!)
             
             predictor_ports+=("$metrics_port:$models_port")
+            predictor_index=$((predictor_index + 1))
         done
         
         # Wait for port forwards to be ready with verification
@@ -643,9 +675,9 @@ function dump::__collect_namespace_data() {
         done
         
         # Collect data from each predictor pod
-        for i in "${!predictor_pods[@]}"; do
-            local pod="${predictor_pods[$i]}"
-            local port_pair="${predictor_ports[$i]}"
+        predictor_index=0
+        for pod in "${predictor_pods[@]}"; do
+            local port_pair="${predictor_ports[$predictor_index]}"
             local metrics_port="${port_pair%:*}"
             local models_port="${port_pair#*:}"
             
@@ -664,6 +696,7 @@ function dump::__collect_namespace_data() {
             else
                 dump::__print_status "      \033[31m✗ Failed to collect models list\033[0m"
             fi
+            predictor_index=$((predictor_index + 1))
         done
         
         # Cleanup port forwards
@@ -687,7 +720,8 @@ function dump::__collect_namespace_data() {
     
     # ScaledObjects (only if CRD exists)
     if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
-        local so_check=$(kubectl get scaledobjects -n "$ns" --no-headers 2>/dev/null)
+        local so_check=""
+        so_check=$(kubectl get scaledobjects -n "$ns" --no-headers 2>/dev/null)
         if [[ -n "$so_check" ]]; then
             kubectl get scaledobjects -n "$ns" -o yaml > "${ns_dir}/scaledobjects.yaml" 2>/dev/null
             dump::__print_status "  \033[32m✓ ScaledObjects collected\033[0m"
@@ -699,7 +733,8 @@ function dump::__collect_namespace_data() {
     fi
     
     # HPAs
-    local hpa_check=$(kubectl get hpa -n "$ns" --no-headers 2>/dev/null)
+    local hpa_check=""
+    hpa_check=$(kubectl get hpa -n "$ns" --no-headers 2>/dev/null)
     if [[ -n "$hpa_check" ]]; then
         kubectl get hpa -n "$ns" -o yaml > "${ns_dir}/hpa.yaml" 2>/dev/null
         dump::__print_status "  \033[32m✓ HPAs collected\033[0m"
@@ -709,7 +744,8 @@ function dump::__collect_namespace_data() {
     
     # ScaledJobs (only if CRD exists)
     if kubectl get crd scaledjobs.keda.sh >/dev/null 2>&1; then
-        local sj_check=$(kubectl get scaledjobs -n "$ns" --no-headers 2>/dev/null)
+        local sj_check=""
+        sj_check=$(kubectl get scaledjobs -n "$ns" --no-headers 2>/dev/null)
         if [[ -n "$sj_check" ]]; then
             kubectl get scaledjobs -n "$ns" -o yaml > "${ns_dir}/scaledjobs.yaml" 2>/dev/null
             dump::__print_status "  \033[32m✓ ScaledJobs collected\033[0m"
@@ -722,7 +758,8 @@ function dump::__collect_namespace_data() {
     
     # HTTPScaledObjects (only if CRD exists)
     if kubectl get crd httpscaledobjects.http.keda.sh >/dev/null 2>&1; then
-        local hso_check=$(kubectl get httpscaledobjects -n "$ns" --no-headers 2>/dev/null)
+        local hso_check=""
+        hso_check=$(kubectl get httpscaledobjects -n "$ns" --no-headers 2>/dev/null)
         if [[ -n "$hso_check" ]]; then
             kubectl get httpscaledobjects -n "$ns" -o yaml > "${ns_dir}/httpscaledobjects.yaml" 2>/dev/null
             dump::__print_status "  \033[32m✓ HTTPScaledObjects collected\033[0m"
@@ -740,26 +777,33 @@ function dump::__collect_namespace_data() {
             
             if [[ ${#hso_names[@]} -gt 0 ]]; then
                 # Start the services YAML file
-                echo "# Services referenced by HTTPScaledObjects in namespace: $ns" > "$services_yaml"
-                echo "# Generated: $(date)" >> "$services_yaml"
-                echo "---" >> "$services_yaml"
+                {
+                    echo "# Services referenced by HTTPScaledObjects in namespace: $ns"
+                    echo "# Generated: $(date)"
+                    echo "---"
+                } > "$services_yaml"
                 
                 for hso_name in "${hso_names[@]}"; do
                     # Get the HTTPScaledObject details
-                    local hso_json=$(kubectl get httpscaledobject "$hso_name" -n "$ns" -o json 2>/dev/null)
+                    local hso_json=""
+                    local target_service=""
+                    local fallback_service=""
+                    hso_json=$(kubectl get httpscaledobject "$hso_name" -n "$ns" -o json 2>/dev/null)
                     
                     # Extract service names
-                    local target_service=$(echo "$hso_json" | jq -r '.spec.scaleTargetRef.service // empty')
-                    local fallback_service=$(echo "$hso_json" | jq -r '.metadata.annotations["http.kedify.io/fallback-service"] // empty')
+                    target_service=$(echo "$hso_json" | jq -r '.spec.scaleTargetRef.service // empty')
+                    fallback_service=$(echo "$hso_json" | jq -r '.metadata.annotations["http.kedify.io/fallback-service"] // empty')
                     
                     local hso_services_found=false
                     
                     # Collect target service
                     if [[ -n "$target_service" ]]; then
                         if kubectl get service "$target_service" -n "$ns" >/dev/null 2>&1; then
-                            echo "# HTTPScaledObject: $hso_name - Target service: $target_service" >> "$services_yaml"
-                            kubectl get service "$target_service" -n "$ns" -o yaml >> "$services_yaml" 2>/dev/null
-                            echo "---" >> "$services_yaml"
+                            {
+                                echo "# HTTPScaledObject: $hso_name - Target service: $target_service"
+                                kubectl get service "$target_service" -n "$ns" -o yaml 2>/dev/null
+                                echo "---"
+                            } >> "$services_yaml"
                             hso_services_found=true
                             services_found=true
                         fi
@@ -768,9 +812,11 @@ function dump::__collect_namespace_data() {
                     # Collect fallback service
                     if [[ -n "$fallback_service" ]]; then
                         if kubectl get service "$fallback_service" -n "$ns" >/dev/null 2>&1; then
-                            echo "# HTTPScaledObject: $hso_name - Fallback service: $fallback_service" >> "$services_yaml"
-                            kubectl get service "$fallback_service" -n "$ns" -o yaml >> "$services_yaml" 2>/dev/null
-                            echo "---" >> "$services_yaml"
+                            {
+                                echo "# HTTPScaledObject: $hso_name - Fallback service: $fallback_service"
+                                kubectl get service "$fallback_service" -n "$ns" -o yaml 2>/dev/null
+                                echo "---"
+                            } >> "$services_yaml"
                             hso_services_found=true
                             services_found=true
                         fi
@@ -797,7 +843,8 @@ function dump::__collect_namespace_data() {
     
     # PodResourceProfiles (only if CRD exists)
     if kubectl get crd podresourceprofiles.keda.kedify.io >/dev/null 2>&1; then
-        local prp_check=$(kubectl get podresourceprofiles -n "$ns" --no-headers 2>/dev/null)
+        local prp_check=""
+        prp_check=$(kubectl get podresourceprofiles -n "$ns" --no-headers 2>/dev/null)
         if [[ -n "$prp_check" ]]; then
             kubectl get podresourceprofiles -n "$ns" -o yaml > "${ns_dir}/podresourceprofiles.yaml" 2>/dev/null
             dump::__print_status "  \033[32m✓ PodResourceProfiles collected\033[0m"
@@ -810,7 +857,8 @@ function dump::__collect_namespace_data() {
     
     # ScalingGroups (only if CRD exists)
     if kubectl get crd scalinggroups.keda.kedify.io >/dev/null 2>&1; then
-        local sg_check=$(kubectl get scalinggroups -n "$ns" --no-headers 2>/dev/null)
+        local sg_check=""
+        sg_check=$(kubectl get scalinggroups -n "$ns" --no-headers 2>/dev/null)
         if [[ -n "$sg_check" ]]; then
             kubectl get scalinggroups -n "$ns" -o yaml > "${ns_dir}/scalinggroups.yaml" 2>/dev/null
             dump::__print_status "  \033[32m✓ ScalingGroups collected\033[0m"
@@ -823,7 +871,8 @@ function dump::__collect_namespace_data() {
     
     # ScalingPolicies (only if CRD exists)
     if kubectl get crd scalingpolicies.keda.kedify.io >/dev/null 2>&1; then
-        local sp_check=$(kubectl get scalingpolicies -n "$ns" --no-headers 2>/dev/null)
+        local sp_check=""
+        sp_check=$(kubectl get scalingpolicies -n "$ns" --no-headers 2>/dev/null)
         if [[ -n "$sp_check" ]]; then
             kubectl get scalingpolicies -n "$ns" -o yaml > "${ns_dir}/scalingpolicies.yaml" 2>/dev/null
             dump::__print_status "  \033[32m✓ ScalingPolicies collected\033[0m"
@@ -836,7 +885,8 @@ function dump::__collect_namespace_data() {
     
     # MetricPredictors (only if CRD exists and predictor is installed)
     if kubectl get crd metricpredictors.keda.kedify.io >/dev/null 2>&1; then
-        local mp_check=$(kubectl get metricpredictors -n "$ns" --no-headers 2>/dev/null)
+        local mp_check=""
+        mp_check=$(kubectl get metricpredictors -n "$ns" --no-headers 2>/dev/null)
         if [[ -n "$mp_check" ]]; then
             kubectl get metricpredictors -n "$ns" -o yaml > "${ns_dir}/metricpredictors.yaml" 2>/dev/null
             dump::__print_status "  \033[32m✓ MetricPredictors collected\033[0m"
@@ -933,7 +983,7 @@ function dump::__collect_namespace_data() {
         
         # Get all pods in the installation namespace
         local all_pods
-        IFS=$'\n' read -d '' -r -a all_pods < <(kubectl get pods -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' && printf '\0')
+        dump::__read_lines_into_array all_pods < <(kubectl get pods -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n')
         
         # Collect pod manifests, descriptions, and logs
         if [[ ${#all_pods[@]} -gt 0 ]]; then
@@ -1033,9 +1083,11 @@ function dump::__generate_summary_file() {
     local collected_namespaces=("$@")
     
     # Pre-compute values to avoid issues with array expansion in heredoc
-    local current_date=$(date)
-    local kubectl_context=$(kubectl config current-context 2>/dev/null || echo "unknown")
+    local current_date=""
+    local kubectl_context=""
     local namespaces_count=0
+    current_date=$(date)
+    kubectl_context=$(kubectl config current-context 2>/dev/null || echo "unknown")
     if [[ ${#collected_namespaces[@]} -gt 0 ]]; then
         namespaces_count=${#collected_namespaces[@]}
     fi
@@ -1046,7 +1098,8 @@ Kedify Diagnostic Information
 EOF
 
     # Add dynamic content that requires variable substitution
-    cat >> "${tempdir}/dump-summary.txt" << EOF
+    {
+    cat << EOF
 Generated: $current_date
 Kubectl Context: $kubectl_context
 Installation Namespace: $installation_ns
@@ -1058,66 +1111,66 @@ Top-level Files:
 
 EOF
 
-    # Add cluster-wide files section only if cluster data was collected
-    if [[ "$COLLECT_CLUSTER_DATA" == "true" && -n "${cluster_dir:-}" ]]; then
-        cat >> "${tempdir}/dump-summary.txt" << EOF
+        # Add cluster-wide files section only if cluster data was collected
+        if [[ "$COLLECT_CLUSTER_DATA" == "true" && -n "${cluster_dir:-}" ]]; then
+            cat << EOF
 Cluster-wide Files (_cluster-info/):
 - cluster-nodes-resource-usage.txt        ... CPU/Memory usage for all nodes
 - cluster-nodes.yaml                      ... Complete node specifications and status
 - cluster-node-*-describe.txt             ... Detailed node descriptions (conditions, taints, allocations)
 EOF
 
-        # Add conditional cluster files
-        if [[ -f "${cluster_dir}/cluster-resource-allocation.txt" ]]; then
-            echo "- cluster-resource-allocation.txt         ... Resource allocation summary across nodes" >> "${tempdir}/dump-summary.txt"
-        fi
-        if [[ -f "${cluster_dir}/cluster-autoscaler-events.yaml" ]]; then
-            echo "- cluster-autoscaler-events.yaml          ... Cluster autoscaler scaling events" >> "${tempdir}/dump-summary.txt"
-        fi
-        if [[ -f "${cluster_dir}/cluster-autoscaler-deployments.yaml" ]]; then
-            echo "- cluster-autoscaler-deployments.yaml     ... Cluster autoscaler deployment configurations" >> "${tempdir}/dump-summary.txt"
-        fi
-        if [[ -f "${cluster_dir}/cluster-autoscaler-pods.yaml" ]]; then
-            echo "- cluster-autoscaler-pods.yaml            ... Cluster autoscaler pod specifications" >> "${tempdir}/dump-summary.txt"
-        fi
-        if ls "${cluster_dir}"/cluster-autoscaler-config-*.yaml >/dev/null 2>&1; then
-            echo "- cluster-autoscaler-config-*.yaml        ... Cluster autoscaler configuration files" >> "${tempdir}/dump-summary.txt"
-        fi
-        if ls "${cluster_dir}"/cluster-autoscaler-*-logs.txt >/dev/null 2>&1; then
-            echo "- cluster-autoscaler-*-logs.txt           ... Cluster autoscaler controller logs" >> "${tempdir}/dump-summary.txt"
-        fi
-        if ls "${cluster_dir}"/cluster-autoscaler-*-status.json >/dev/null 2>&1; then
-            echo "- cluster-autoscaler-*-status.json        ... Cluster autoscaler status API output" >> "${tempdir}/dump-summary.txt"
-        fi
-        if [[ -f "${cluster_dir}/karpenter-events.yaml" ]]; then
-            echo "- karpenter-events.yaml                   ... Karpenter scaling events" >> "${tempdir}/dump-summary.txt"
-        fi
-        if [[ -f "${cluster_dir}/karpenter-nodepools.yaml" ]]; then
-            echo "- karpenter-nodepools.yaml                ... Karpenter NodePool configurations" >> "${tempdir}/dump-summary.txt"
-        fi
-        if [[ -f "${cluster_dir}/karpenter-nodeclaims.yaml" ]]; then
-            echo "- karpenter-nodeclaims.yaml               ... Karpenter NodeClaim status" >> "${tempdir}/dump-summary.txt"
-        fi
-        if [[ -f "${cluster_dir}/karpenter-provisioners.yaml" ]]; then
-            echo "- karpenter-provisioners.yaml             ... Karpenter Provisioners (legacy)" >> "${tempdir}/dump-summary.txt"
-        fi
-        if ls "${cluster_dir}"/karpenter-*-logs.txt >/dev/null 2>&1; then
-            echo "- karpenter-*-logs.txt                    ... Karpenter controller logs" >> "${tempdir}/dump-summary.txt"
-        fi
-        if [[ -f "${cluster_dir}/cluster-pending-pods.yaml" ]]; then
-            echo "- cluster-pending-pods.yaml               ... Pods stuck in Pending state (resource constraints)" >> "${tempdir}/dump-summary.txt"
-        fi
-        echo "" >> "${tempdir}/dump-summary.txt"
-    else
-        cat >> "${tempdir}/dump-summary.txt" << EOF
+            # Add conditional cluster files
+            if [[ -f "${cluster_dir}/cluster-resource-allocation.txt" ]]; then
+                echo "- cluster-resource-allocation.txt         ... Resource allocation summary across nodes"
+            fi
+            if [[ -f "${cluster_dir}/cluster-autoscaler-events.yaml" ]]; then
+                echo "- cluster-autoscaler-events.yaml          ... Cluster autoscaler scaling events"
+            fi
+            if [[ -f "${cluster_dir}/cluster-autoscaler-deployments.yaml" ]]; then
+                echo "- cluster-autoscaler-deployments.yaml     ... Cluster autoscaler deployment configurations"
+            fi
+            if [[ -f "${cluster_dir}/cluster-autoscaler-pods.yaml" ]]; then
+                echo "- cluster-autoscaler-pods.yaml            ... Cluster autoscaler pod specifications"
+            fi
+            if ls "${cluster_dir}"/cluster-autoscaler-config-*.yaml >/dev/null 2>&1; then
+                echo "- cluster-autoscaler-config-*.yaml        ... Cluster autoscaler configuration files"
+            fi
+            if ls "${cluster_dir}"/cluster-autoscaler-*-logs.txt >/dev/null 2>&1; then
+                echo "- cluster-autoscaler-*-logs.txt           ... Cluster autoscaler controller logs"
+            fi
+            if ls "${cluster_dir}"/cluster-autoscaler-*-status.json >/dev/null 2>&1; then
+                echo "- cluster-autoscaler-*-status.json        ... Cluster autoscaler status API output"
+            fi
+            if [[ -f "${cluster_dir}/karpenter-events.yaml" ]]; then
+                echo "- karpenter-events.yaml                   ... Karpenter scaling events"
+            fi
+            if [[ -f "${cluster_dir}/karpenter-nodepools.yaml" ]]; then
+                echo "- karpenter-nodepools.yaml                ... Karpenter NodePool configurations"
+            fi
+            if [[ -f "${cluster_dir}/karpenter-nodeclaims.yaml" ]]; then
+                echo "- karpenter-nodeclaims.yaml               ... Karpenter NodeClaim status"
+            fi
+            if [[ -f "${cluster_dir}/karpenter-provisioners.yaml" ]]; then
+                echo "- karpenter-provisioners.yaml             ... Karpenter Provisioners (legacy)"
+            fi
+            if ls "${cluster_dir}"/karpenter-*-logs.txt >/dev/null 2>&1; then
+                echo "- karpenter-*-logs.txt                    ... Karpenter controller logs"
+            fi
+            if [[ -f "${cluster_dir}/cluster-pending-pods.yaml" ]]; then
+                echo "- cluster-pending-pods.yaml               ... Pods stuck in Pending state (resource constraints)"
+            fi
+            echo ""
+        else
+            cat << EOF
 Cluster-wide Files:
 - No cluster-wide data collected (--collect-cluster-data=false was used)
 
 EOF
-    fi
+        fi
 
-    # Add the rest of the static content
-    cat >> "${tempdir}/dump-summary.txt" << EOF
+        # Add the rest of the static content
+        cat << EOF
 Per-namespace Files:
 - events.yaml                             ... Kubernetes events for the namespace
 - scaledobjects.yaml                      ... ScaledObject resources (if any)
@@ -1160,19 +1213,20 @@ Installation namespace additional files:
 Directory Structure:
 EOF
 
-    # Add dynamic directory listing
-    find "$tempdir" -type d | sort >> "${tempdir}/dump-summary.txt"
-    
-    cat >> "${tempdir}/dump-summary.txt" << EOF
+        # Add dynamic directory listing
+        find "$tempdir" -type d | sort
+        
+        cat << EOF
 
 Files collected:
 EOF
 
-    # Add dynamic file listing
-    find "$tempdir" -type f -name "*.yaml" -o -name "*.txt" -o -name "*.json" | sort >> "${tempdir}/dump-summary.txt"
+        # Add dynamic file listing
+        find "$tempdir" -type f \( -name "*.yaml" -o -name "*.txt" -o -name "*.json" \) | sort
+    } >> "${tempdir}/dump-summary.txt"
 }
 
-function dump::cmd() {
+function dump::__cmd_impl() {
     # Check if required tools are available
     local missing_tools=()
     
@@ -1242,7 +1296,6 @@ function dump::cmd() {
     local output_dir="."
     local create_archive="false"
     local all_namespaces="false"
-    local quiet_mode="false"
     local next="false"
     local next_type=""
     
@@ -1305,14 +1358,10 @@ function dump::cmd() {
                 all_namespaces="true"
                 ;;
             -q|--quiet)
-                quiet_mode="true"
                 QUIET_MODE="true"
                 ;;
             -a|--archive)
                 create_archive="true"
-                ;;
-            -c=*|--collect-cluster-data=*)
-                COLLECT_CLUSTER_DATA="$(dump::__validate_bool "${o#*=}")"
                 ;;
             -c=*|--collect-cluster-data=*)
                 # Handle formats like -c=true, -c=false, --collect-cluster-data=true, --collect-cluster-data=false
@@ -1396,7 +1445,8 @@ function dump::cmd() {
         dump::__print_status "\033[36mDetected Kedify installation in namespace:\033[0m $installation_ns"
     elif kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
         # Try to find KEDA operator deployment
-        local keda_ns=$(kubectl get deployments --all-namespaces -l app.kubernetes.io/name=keda-operator -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo "")
+        local keda_ns=""
+        keda_ns=$(kubectl get deployments --all-namespaces -l app.kubernetes.io/name=keda-operator -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo "")
         if [[ -n "$keda_ns" ]]; then
             installation_ns="$keda_ns"
             dump::__print_status "\033[36mDetected KEDA installation in namespace:\033[0m $installation_ns"
@@ -1413,7 +1463,7 @@ function dump::cmd() {
     # Collect namespaces to process
     local namespaces=()
     if [[ "$all_namespaces" == "true" ]]; then
-        IFS=$'\n' read -d '' -r -a namespaces < <(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' && printf '\0')
+        dump::__read_lines_into_array namespaces < <(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n')
         dump::__print_status "\033[36mScope:\033[0m All namespaces (${#namespaces[@]} total)"
     else
         if [[ -n "$target_ns" ]]; then
@@ -1537,7 +1587,8 @@ function dump::cmd() {
         # Cluster autoscaler configuration (ConfigMaps)
         kubectl get configmaps --all-namespaces -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep -i "cluster-autoscaler\|autoscaling" | while read -r cm_name; do
             if [[ -n "$cm_name" ]]; then
-                local cm_namespace=$(kubectl get configmap "$cm_name" --all-namespaces -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null)
+                local cm_namespace=""
+                cm_namespace=$(kubectl get configmap "$cm_name" --all-namespaces -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null)
                 kubectl get configmap "$cm_name" -n "$cm_namespace" -o yaml > "${cluster_dir}/cluster-autoscaler-config-${cm_name}.yaml" 2>/dev/null || true
             fi
         done
@@ -1550,7 +1601,8 @@ function dump::cmd() {
         # Cluster autoscaler controller logs
         kubectl get pods --all-namespaces -l app=cluster-autoscaler -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | while read -r pod; do
             if [[ -n "$pod" ]]; then
-                local pod_namespace=$(kubectl get pod "$pod" --all-namespaces -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null)
+                local pod_namespace=""
+                pod_namespace=$(kubectl get pod "$pod" --all-namespaces -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null)
                 kubectl logs -n "$pod_namespace" "$pod" --tail=1000 > "${cluster_dir}/cluster-autoscaler-${pod}-logs.txt" 2>/dev/null || true
                 kubectl logs -n "$pod_namespace" "$pod" --previous --tail=1000 > "${cluster_dir}/cluster-autoscaler-${pod}-logs-previous.txt" 2>/dev/null || true
             fi
@@ -1564,7 +1616,8 @@ function dump::cmd() {
         # Cluster autoscaler status (from status API if available)
         kubectl get pods --all-namespaces -l app=cluster-autoscaler -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | while read -r pod; do
             if [[ -n "$pod" ]]; then
-                local pod_namespace=$(kubectl get pod "$pod" --all-namespaces -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null)
+                local pod_namespace=""
+                pod_namespace=$(kubectl get pod "$pod" --all-namespaces -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null)
                 # Try to get autoscaler status via API (port 8085 is common for cluster autoscaler)
                 kubectl get pod -n "$pod_namespace" "$pod" -o jsonpath='{.spec.containers[*].ports[*].containerPort}' 2>/dev/null | tr ' ' '\n' | while read -r port; do
                     if [[ "$port" == "8085" ]] || [[ "$port" == "8086" ]]; then
@@ -1664,7 +1717,8 @@ function dump::cmd() {
     fi
     
     # Pending pods (may indicate resource constraints)
-    local pending_count=$(kubectl get pods --all-namespaces --field-selector=status.phase=Pending --no-headers 2>/dev/null | wc -l)
+    local pending_count
+    pending_count=$(dump::__kubectl_count get pods --all-namespaces --field-selector=status.phase=Pending)
     if [[ $pending_count -gt 0 ]]; then
         kubectl get pods --all-namespaces --field-selector=status.phase=Pending -o yaml > "${cluster_dir}/cluster-pending-pods.yaml" 2>/dev/null
         dump::__print_status "  \033[33m⚠ Found $pending_count pending pod(s) - may indicate resource constraints\033[0m"
@@ -1698,29 +1752,32 @@ function dump::cmd() {
         
         # For non-installation namespaces, check if they have relevant resources
         if [[ "$is_installation" == "false" ]]; then
-            local has_proxy=$(kubectl get pods -n "$ns" -l app=kedify-proxy --no-headers 2>/dev/null | wc -l || echo "0")
-            local has_predictor=$(kubectl get pods -n "$ns" -l app=kedify-predictor --no-headers 2>/dev/null | wc -l || echo "0")
+            local has_proxy
+            local has_predictor
             local has_so=0
             local has_hpa=0
             local has_sj=0
             local has_hso=0
+
+            has_proxy=$(dump::__kubectl_count get pods -n "$ns" -l app=kedify-proxy)
+            has_predictor=$(dump::__kubectl_count get pods -n "$ns" -l app=kedify-predictor)
             
             # Check for ScaledObjects (only if CRD exists)
             if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
-                has_so=$(kubectl get scaledobjects -n "$ns" --no-headers 2>/dev/null | wc -l || echo "0")
+                has_so=$(dump::__kubectl_count get scaledobjects -n "$ns")
             fi
             
             # Check for HPAs
-            has_hpa=$(kubectl get hpa -n "$ns" --no-headers 2>/dev/null | wc -l || echo "0")
+            has_hpa=$(dump::__kubectl_count get hpa -n "$ns")
             
             # Check for ScaledJobs (only if CRD exists)
             if kubectl get crd scaledjobs.keda.sh >/dev/null 2>&1; then
-                has_sj=$(kubectl get scaledjobs -n "$ns" --no-headers 2>/dev/null | wc -l || echo "0")
+                has_sj=$(dump::__kubectl_count get scaledjobs -n "$ns")
             fi
             
             # Check for HTTPScaledObjects (only if CRD exists)
             if kubectl get crd httpscaledobjects.http.keda.sh >/dev/null 2>&1; then
-                has_hso=$(kubectl get httpscaledobjects -n "$ns" --no-headers 2>/dev/null | wc -l || echo "0")
+                has_hso=$(dump::__kubectl_count get httpscaledobjects -n "$ns")
             fi
             
             # Skip if no relevant resources
@@ -1797,15 +1854,22 @@ function dump::cmd() {
     fi
 }
 
+function dump::cmd() (
+    dump::__configure_shell
+    dump::__cmd_impl "$@"
+)
+
 function dump::__generate_cluster_health_summary() {
     local tempdir="$1"
     local cluster_dir="$2"
     local summary_file="${tempdir}/cluster-health-summary.txt"
     
-    echo "Cluster Health Summary" > "$summary_file"
-    echo "=====================" >> "$summary_file"
-    echo "Generated: $(date)" >> "$summary_file"
-    echo "" >> "$summary_file"
+    {
+        echo "Cluster Health Summary"
+        echo "====================="
+        echo "Generated: $(date)"
+        echo ""
+    } > "$summary_file"
     
     # Node status
     echo "Node Status:" >> "$summary_file"
@@ -1834,7 +1898,8 @@ function dump::__generate_cluster_health_summary() {
     
     # Pending pods summary
     echo "Resource Constraints:" >> "$summary_file"
-    local pending_count=$(kubectl get pods --all-namespaces --field-selector=status.phase=Pending --no-headers 2>/dev/null | wc -l)
+    local pending_count
+    pending_count=$(dump::__kubectl_count get pods --all-namespaces --field-selector=status.phase=Pending)
     if [[ $pending_count -gt 0 ]]; then
         echo "  ⚠ $pending_count pod(s) in Pending state" >> "$summary_file"
         # Use a temporary variable to avoid pipeline failures
@@ -1857,7 +1922,8 @@ function dump::__generate_cluster_health_summary() {
     # Recent autoscaler events
     echo "Recent Cluster Autoscaler Activity:" >> "$summary_file"
     if [[ -n "$cluster_dir" && -f "${cluster_dir}/cluster-autoscaler-events.yaml" ]]; then
-        local recent_events=$(kubectl get events --all-namespaces --sort-by='.lastTimestamp' 2>/dev/null | grep -i "scaled.*group\|autoscaler" | tail -5)
+        local recent_events=""
+        recent_events=$(kubectl get events --all-namespaces --sort-by='.lastTimestamp' 2>/dev/null | grep -i "scaled.*group\|autoscaler" | tail -5)
         if [[ -n "$recent_events" ]]; then
             echo "$recent_events" | while read -r event; do
                 echo "  $event" >> "$summary_file"
@@ -1873,7 +1939,8 @@ function dump::__generate_cluster_health_summary() {
     # Recent Karpenter activity
     echo "Recent Karpenter Activity:" >> "$summary_file"
     if [[ -n "$cluster_dir" && -f "${cluster_dir}/karpenter-events.yaml" ]]; then
-        local karpenter_events=$(kubectl get events --all-namespaces --sort-by='.lastTimestamp' 2>/dev/null | grep -i "karpenter\|provisioner\|nodepool\|nodeclaim" | tail -5)
+        local karpenter_events=""
+        karpenter_events=$(kubectl get events --all-namespaces --sort-by='.lastTimestamp' 2>/dev/null | grep -i "karpenter\|provisioner\|nodepool\|nodeclaim" | tail -5)
         if [[ -n "$karpenter_events" ]]; then
             echo "$karpenter_events" | while read -r event; do
                 echo "  $event" >> "$summary_file"
@@ -1929,10 +1996,13 @@ function dump::__extract_helm_release_data() {
     
     dump::__print_status "  \033[36m- Found Helm release secret: $secret_name\033[0m"
     
-    local helm_data=$(kubectl get secret -n "$ns" "$secret_name" -o jsonpath='{.data.release}' 2>/dev/null)
+    local helm_data=""
+    helm_data=$(kubectl get secret -n "$ns" "$secret_name" -o jsonpath='{.data.release}' 2>/dev/null)
     if [[ -n "$helm_data" ]]; then
-        local safe_name=$(echo "$secret_name" | tr '.' '_')
-        local temp_release=$(mktemp)
+        local safe_name=""
+        local temp_release=""
+        safe_name=$(echo "$secret_name" | tr '.' '_')
+        temp_release=$(mktemp)
         
         if echo "$helm_data" | base64 -d | base64 -d | gunzip 2>/dev/null > "$temp_release"; then
             # Extract default values and convert to YAML
@@ -1952,9 +2022,12 @@ function dump::__extract_helm_release_data() {
             fi
             
             # Extract version information
-            local chart_version=$(jq -r '.chart.metadata.version // empty' "$temp_release" 2>/dev/null)
-            local app_version=$(jq -r '.chart.metadata.appVersion // empty' "$temp_release" 2>/dev/null)
-            local release_version=$(jq -r '.version // empty' "$temp_release" 2>/dev/null)
+            local chart_version=""
+            local app_version=""
+            local release_version=""
+            chart_version=$(jq -r '.chart.metadata.version // empty' "$temp_release" 2>/dev/null)
+            app_version=$(jq -r '.chart.metadata.appVersion // empty' "$temp_release" 2>/dev/null)
+            release_version=$(jq -r '.version // empty' "$temp_release" 2>/dev/null)
             
             if [[ -n "$chart_version" || -n "$app_version" || -n "$release_version" ]]; then
                 {
@@ -1985,6 +2058,14 @@ function dump::__extract_helm_release_data() {
 }
 
 # Execute dump::cmd when script is run directly (not sourced)
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+if [[ -n "${BASH_VERSION:-}" ]]; then
+    if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+        dump::cmd "$@"
+    fi
+elif [[ -n "${ZSH_VERSION:-}" ]]; then
+    if [[ "${ZSH_EVAL_CONTEXT:-}" == "toplevel" ]]; then
+        dump::cmd "$@"
+    fi
+else
     dump::cmd "$@"
 fi

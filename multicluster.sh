@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
-set -Eo functrace
-
 function multicluster::__failure() {
     local lineno=$1
     local msg=$2
     echo "Failed at $lineno: $msg"
 }
-trap 'multicluster::__failure ${LINENO} "$BASH_COMMAND"' ERR
+
+function multicluster::__configure_shell() {
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+        emulate -L ksh
+        setopt typeset_silent
+    fi
+
+    set -euo pipefail
+
+    if [[ -n "${BASH_VERSION:-}" ]]; then
+        set -E
+        trap 'multicluster::__failure ${LINENO} "$BASH_COMMAND"' ERR
+    fi
+}
 
 
 function multicluster::__print_usage() {
@@ -93,8 +103,8 @@ function multicluster::__list_members() {
         exit 1
     fi
 
-    local members=()
-    mapfile -t members < <(
+    local members_list
+    members_list=$(
         kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs -o jsonpath="{.data}" |
             jq -r 'keys[] | sub("-cluster\\.kubeconfig$"; "")'
     )
@@ -106,18 +116,15 @@ function multicluster::__list_members() {
     fi
 
     local member
-    local states=()
-    local infos=()
+    local state=""
+    local info=""
     local cluster_width=7
     local state_width=5
 
-    for member in "${members[@]}"; do
-        local state
-        local info
+    while IFS= read -r member; do
+        [[ -z "${member}" ]] && continue
+
         state=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].state // "Unknown"')
-        info=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].info // "missing status information"')
-        states+=("${state}")
-        infos+=("${info}")
 
         if (( ${#member} > cluster_width )); then
             cluster_width=${#member}
@@ -125,7 +132,9 @@ function multicluster::__list_members() {
         if (( ${#state} > state_width )); then
             state_width=${#state}
         fi
-    done
+    done <<EOF
+${members_list}
+EOF
 
     if [[ "${output_format}" == "wide" ]]; then
         printf "%-${cluster_width}s  %-${state_width}s  %s\n" "CLUSTER" "STATE" "INFO"
@@ -133,17 +142,20 @@ function multicluster::__list_members() {
         printf "%-${cluster_width}s  %s\n" "CLUSTER" "STATE"
     fi
 
-    local idx
-    for idx in "${!members[@]}"; do
-        member=${members[$idx]}
-        local state="${states[$idx]}"
-        local info="${infos[$idx]}"
+    while IFS= read -r member; do
+        [[ -z "${member}" ]] && continue
+
+        state=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].state // "Unknown"')
+        info=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].info // "missing status information"')
+
         if [[ "${output_format}" == "wide" ]]; then
             printf "%-${cluster_width}s  %-${state_width}s  %s\n" "${member}" "${state}" "${info}"
         else
             printf "%-${cluster_width}s  %s\n" "${member}" "${state}"
         fi
-    done
+    done <<EOF
+${members_list}
+EOF
 }
 
 function multicluster::__delete_member() {
@@ -213,6 +225,9 @@ function multicluster::__setup_member() {
     local namespace="keda"
     local member_api_url=""
     local auto_confirm="false"
+    local ca=""
+    local server=""
+    local selected_context=""
 
     if [[ $# -eq 0 ]]; then
         echo "Member name is required for setup-member command."
@@ -319,9 +334,9 @@ EOF
     local retries=5
     local wait_time=2
     local token=""
+    local raw=""
 
     for ((attempt=1; attempt<=retries; attempt++)); do
-        local raw=""
         if raw=$(kubectl --context="${member_context}" get secret kedify-agent-token -n "${namespace}" -o jsonpath="{.data['token']}" | base64 --decode); then
             if [[ -n "$raw" ]]; then
                 token="$raw"
@@ -358,10 +373,12 @@ EOF
         fi
     fi
     # Create a secure temporary kubeconfig file
-    local temp_kubeconfig
-    temp_kubeconfig=$(mktemp /tmp/kedify-agent-${member_name}-kubeconfig.XXXXXX)
+    local temp_kubeconfig=""
+    local temp_kubeconfig_escaped=""
+    temp_kubeconfig=$(mktemp /tmp/kedify-agent-"${member_name}"-kubeconfig.XXXXXX)
     chmod 600 "$temp_kubeconfig"
-    trap "rm -f '$temp_kubeconfig'" EXIT
+    temp_kubeconfig_escaped=$(printf '%q' "$temp_kubeconfig")
+    trap 'rm -f -- '"${temp_kubeconfig_escaped}" EXIT
 
     # Create kubeconfig for the member cluster to be used by kedify-agent in KEDA cluster
     cat <<EOF > "$temp_kubeconfig"
@@ -398,13 +415,13 @@ EOF
     kubectl -n "${namespace}" --context="${keda_context}" patch secret kedify-agent-multicluster-kubeconfigs \
         --type=merge \
         -p "$(kubectl create secret generic temp \
-        --from-file=${member_name}-cluster.kubeconfig="${temp_kubeconfig}" \
+        --from-file="${member_name}"-cluster.kubeconfig="${temp_kubeconfig}" \
         --dry-run=client -o json | jq '{data:.data}')"
 
     echo "Member cluster '${member_name}' has been set up successfully."
 }
 
-function multicluster::cmd() {
+function multicluster::__cmd_impl() {
     if [[ $# -eq 0 ]]; then
         multicluster::__print_usage
         exit 1
@@ -438,3 +455,8 @@ function multicluster::cmd() {
             ;;
     esac
 }
+
+function multicluster::cmd() (
+    multicluster::__configure_shell
+    multicluster::__cmd_impl "$@"
+)

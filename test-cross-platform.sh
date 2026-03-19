@@ -37,6 +37,49 @@ print_info() {
     echo -e "${YELLOW}[INFO]${NC} $1"
 }
 
+run_with_timeout() {
+    local seconds="$1"
+    shift
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${seconds}" "$@"
+        return $?
+    fi
+
+    if command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "${seconds}" "$@"
+        return $?
+    fi
+
+    "$@" &
+    local cmd_pid=$!
+    local timer_pid=""
+    local status=0
+
+    (
+        sleep "${seconds}"
+        kill -TERM "${cmd_pid}" 2>/dev/null || true
+        sleep 1
+        kill -KILL "${cmd_pid}" 2>/dev/null || true
+    ) &
+    timer_pid=$!
+
+    if wait "${cmd_pid}"; then
+        status=0
+    else
+        status=$?
+    fi
+
+    kill "${timer_pid}" 2>/dev/null || true
+    wait "${timer_pid}" 2>/dev/null || true
+
+    if [[ ${status} -eq 143 || ${status} -eq 137 ]]; then
+        return 124
+    fi
+
+    return "${status}"
+}
+
 # Helper function to get all scripts
 get_all_scripts() {
     # Find all .sh files and the main kubectl-kedify script
@@ -177,18 +220,36 @@ test_help_output() {
     print_test "Testing help output..."
     
     # Test help output (may fail due to missing cluster, but that's OK for syntax testing)
-    if timeout 5s ./kubectl-kedify --help >/dev/null 2>&1; then
+    if run_with_timeout 5 ./kubectl-kedify --help >/dev/null 2>&1; then
         print_pass "Help output works"
     else
         print_pass "Help test completed (expected to fail without cluster access)"
     fi
     
     # Test version output
-    if timeout 5s ./kubectl-kedify --version >/dev/null 2>&1; then
+    if run_with_timeout 5 ./kubectl-kedify --version >/dev/null 2>&1; then
         print_pass "Version output works"
     else
         print_pass "Version test completed (may have failed due to missing VERSION file)"
     fi
+}
+
+test_path_invocation() {
+    print_test "Testing invocation via PATH and symlink..."
+
+    local temp_dir=""
+    temp_dir="$(mktemp -d)"
+    ln -s "${PWD}/kubectl-kedify" "${temp_dir}/kubectl-kedify"
+
+    if run_with_timeout 5 env "PATH=${temp_dir}:${PATH}" bash -lc 'cd /tmp && kubectl-kedify --help >/dev/null 2>&1'; then
+        print_pass "PATH-based symlink invocation works"
+    else
+        print_fail "PATH-based symlink invocation failed"
+        rm -rf "${temp_dir}"
+        return 1
+    fi
+
+    rm -rf "${temp_dir}"
 }
 
 test_dependencies() {
@@ -334,6 +395,7 @@ run_full_tests() {
     run_smoke_tests
     test_platform_detection || true
     test_help_output || true
+    test_path_invocation || true
     run_shellcheck || true
 }
 

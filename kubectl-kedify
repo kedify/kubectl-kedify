@@ -1,35 +1,78 @@
 #!/bin/bash
 set -e
 
-DIR="${DIR:-$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )}"
+kedify::__resolve_script_path() {
+    local candidate="${1:-$0}"
+    local resolved=""
+    local target=""
+    local candidate_dir=""
+
+    if [[ "$candidate" != */* ]]; then
+        resolved=$(command -v -- "$candidate" 2>/dev/null || true)
+        if [[ -n "$resolved" ]]; then
+            candidate="$resolved"
+        fi
+    fi
+
+    while [[ -L "$candidate" ]]; do
+        if ! command -v readlink >/dev/null 2>&1; then
+            break
+        fi
+
+        target=$(readlink "$candidate" 2>/dev/null || true)
+        if [[ -z "$target" ]]; then
+            break
+        fi
+
+        if [[ "$target" == /* ]]; then
+            candidate="$target"
+        else
+            candidate_dir="$(cd "$(dirname "$candidate")" && pwd)"
+            candidate="${candidate_dir}/${target}"
+        fi
+    done
+
+    printf '%s\n' "$candidate"
+}
+
+SCRIPT_PATH="$(kedify::__resolve_script_path "$0")"
+DIR="${DIR:-$( cd "$( dirname "${SCRIPT_PATH}" )" && pwd )}"
 # API=${TEMPLATE_FILE:-"https://api.kedify.io"}
 API=${TEMPLATE_FILE:-"https://api.dev.kedify.io"}
-HELPERS=${DIR}/preview-functions.sh
-AUTOSCALABLE_RESOURCE_KIND=(ingress service virtualservice httproute)
+AUTOSCALABLE_RESOURCE_KINDS=(ingress service virtualservice httproute)
+AUTOSCALABLE_RESOURCE_KIND=""
 TEMPLATE_FILE=${TEMPLATE_FILE:-"hso.yaml"}
 export COL="\e[2;35;49m"
 export RES="\e[0m"
+HELPERS="${DIR}/preview-functions.sh"
+DEBUG_SCRIPT="${DIR}/debug.sh"
+INSIGHTS_SCRIPT="${DIR}/insights.sh"
+DUMP_SCRIPT="${DIR}/dump.sh"
+MC_SCRIPT="${DIR}/multicluster.sh"
+VERSION_FILE="${DIR}/VERSION"
+README_FILE="${DIR}/README.md"
 
-# Detect if running as kubectl plugin or locally
-# Check if the script is in the krew store path or being run locally
-if [[ "$0" == *"/.krew/store/"* ]] || [[ "$0" == *"/.krew/bin/"* ]]; then
-    # Running as kubectl plugin - use krew store
-    STORE_PATH="$(kubectl krew version | awk '/InstallPath/{print($2)}')/kedify/"
-    KEDIFY_VERSION=$(ls "$STORE_PATH" | head -n1)
-    DEBUG_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/debug.sh"
-    INSIGHTS_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/insights.sh"
-    DUMP_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/dump.sh"
-    MC_SCRIPT="${STORE_PATH}${KEDIFY_VERSION}/multicluster.sh"
-else
-    # Running locally - use local files
-    DEBUG_SCRIPT="${DIR}/debug.sh"
-    INSIGHTS_SCRIPT="${DIR}/insights.sh"
-    DUMP_SCRIPT="${DIR}/dump.sh"
-    MC_SCRIPT="${DIR}/multicluster.sh"
-fi
+kedify::__has_yes_flag() {
+    local arg=""
+    for arg in "$@"; do
+        if [[ "$arg" == "-y" || "$arg" == "--yes" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+kedify::__read_single_char() {
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+        IFS= read -r -k 1 REPLY
+    else
+        IFS= read -r -n 1 REPLY
+    fi
+}
 
 # Source debug script if it exists
 if [[ -f "${DEBUG_SCRIPT}" ]]; then
+    # shellcheck source=./debug.sh
     source "${DEBUG_SCRIPT}"
 else
     echo "Warning: Debug script not found at ${DEBUG_SCRIPT}" >&2
@@ -37,6 +80,7 @@ fi
 
 # Source insights script if it exists
 if [[ -f "${INSIGHTS_SCRIPT}" ]]; then
+    # shellcheck source=./insights.sh
     source "${INSIGHTS_SCRIPT}"
 else
     echo "Warning: Insights script not found at ${INSIGHTS_SCRIPT}" >&2
@@ -44,6 +88,7 @@ fi
 
 # Source multicluster script if it exists
 if [[ -f "${MC_SCRIPT}" ]]; then
+    # shellcheck source=./multicluster.sh
     source "${MC_SCRIPT}"
 else
     echo "Warning: Multicluster script not found at ${MC_SCRIPT}" >&2
@@ -51,40 +96,88 @@ fi
 
 # Source dump script if it exists
 if [[ -f "${DUMP_SCRIPT}" ]]; then
+    # shellcheck source=./dump.sh
     source "${DUMP_SCRIPT}"
 else
     echo "Warning: Dump script not found at ${DUMP_SCRIPT}" >&2
 fi
 
 main() {
+    local c=""
+    local requirements=""
+
     [[ $# -lt 1 ]] && print_usage && exit 1
     for c in curl figlet fzf kubectl yq jq; do
-        ! command -v "${c}" &> /dev/null && echo -e "Install ${c}, this script needs it.\n       ^^^^^^\n\n\n$(cat README.md | grep -A99 '### Requirements')" && exit 2
+        if ! command -v "${c}" &> /dev/null; then
+            if [[ -r "${README_FILE}" ]]; then
+                requirements=$(grep -A99 '### Requirements' "${README_FILE}" || true)
+            fi
+            echo -e "Install ${c}, this script needs it.\n       ^^^^^^\n\n\n${requirements}"
+            exit 2
+        fi
     done
     # bat is special on ubuntu
     command -v "bat" &> /dev/null || command -v "batcat" &> /dev/null || echo -e "Install bat this script needs it.\n\n  consult https://github.com/sharkdp/bat?tab=readme-ov-file#installation"
-    export BAT=$(command -v "bat" &> /dev/null && echo "bat" || echo "batcat")
-    export KUBECTL=$(command -v "kubecolor" &> /dev/null && echo "kubecolor" || echo "kubectl")
-    
-    [[ $1 == install ]] || [[ $1 == i ]]   && { install "$@" ; exit 0; }
-    [[ $1 == delete ]] || [[ $1 == d ]]    && { delete "$@" ; exit 0; }
-    [[ $1 == status ]] || [[ $1 == s ]]    && { status ; exit 0; }
-    [[ $1 == logs ]] || [[ $1 == l ]]      && { shift 1 ; logs "$@" ; exit 0; }
-    [[ $1 == autoscale ]] || [[ $1 == a ]] && {
-        [[ $2 == ingress ]] || [[ $2 == ing ]] || [[ $2 == i ]] && { autoscale_ing ; exit 0; }
-        autoscale ; exit 0
-    }
-    [[ $1 == multicluster ]] || [[ $1 == mc ]] && { shift 1 ; multicluster::cmd "$@" ; exit 0; }
-    [[ $1 == debug ]] || [[ $1 == dbg ]] && { shift 1 ; debug::cmd "$@" ; exit 0; }
-    [[ $1 == insights ]] || [[ $1 == ins ]] && { shift 1 ; insights::cmd "$@" ; exit 0; }
-    [[ $1 == dump ]] || [[ $1 == dmp ]] && { shift 1 ; dump::cmd "$@" ; exit 0; }
-    [[ $1 == -v ]] || [[ $1 == --version ]] && { print_version ; exit 0; }
-    [[ $1 == -h ]] || [[ $1 == --help ]] && { print_usage ; exit 0; }
-    print_usage
+    BAT=$(command -v "bat" &> /dev/null && echo "bat" || echo "batcat")
+    KUBECTL=$(command -v "kubecolor" &> /dev/null && echo "kubecolor" || echo "kubectl")
+    export BAT
+    export KUBECTL
+
+    case "${1}" in
+        install|i)
+            install "$@"
+            ;;
+        delete|d)
+            delete "$@"
+            ;;
+        status|s)
+            status
+            ;;
+        logs|l)
+            shift 1
+            logs "$@"
+            ;;
+        autoscale|a)
+            case "${2:-}" in
+                ingress|ing|i)
+                    AUTOSCALABLE_RESOURCE_KIND="ingress"
+                    autoscale_ing
+                    ;;
+                *)
+                    autoscale
+                    ;;
+            esac
+            ;;
+        multicluster|mc)
+            shift 1
+            multicluster::cmd "$@"
+            ;;
+        debug|dbg)
+            shift 1
+            debug::cmd "$@"
+            ;;
+        insights|ins)
+            shift 1
+            insights::cmd "$@"
+            ;;
+        dump|dmp)
+            shift 1
+            dump::cmd "$@"
+            ;;
+        -v|--version)
+            print_version
+            ;;
+        -h|--help)
+            print_usage
+            ;;
+        *)
+            print_usage
+            ;;
+    esac
 }
 
 autoscale() {
-    AUTOSCALABLE_RESOURCE_KIND=$(printf "%s\n" "${AUTOSCALABLE_RESOURCE_KIND[@]}" | \
+    AUTOSCALABLE_RESOURCE_KIND=$(printf "%s\n" "${AUTOSCALABLE_RESOURCE_KINDS[@]}" | \
      tr ' ' '\n' | \
      fzf --header "Select a kind that represents the applications you would like to autoscale based on incoming http traffic" --prompt='λ' --cycle --preview-window top:80% \
       --preview "printf '${COL}'; figlet -f big Kedify.io;printf '${RES}'; echo Kind: {}; kubectl get {} -A")
@@ -94,69 +187,83 @@ autoscale() {
 }
 
 autoscale_ing() {
-    AUTOSCALABLE_RESOURCE_AND_NS=$(kubectl get ${AUTOSCALABLE_RESOURCE_KIND} --no-headers -o custom-columns=":metadata.namespace,:metadata.name" -A | \
+    AUTOSCALABLE_RESOURCE_AND_NS=$(kubectl get "${AUTOSCALABLE_RESOURCE_KIND}" --no-headers -o custom-columns=":metadata.namespace,:metadata.name" -A | \
     fzf --header "Select ${AUTOSCALABLE_RESOURCE_KIND} that represents the applications you would like to autoscale based on incoming http traffic" --prompt='λ' --cycle --preview-window top:80% \
       --preview "source ${HELPERS} && printf '${COL}'; figlet -f big Kedify.io;printf '${RES}'; preview_ing {} ${AUTOSCALABLE_RESOURCE_KIND};")
-    export AUTOSCALABLE_RESOURCE=$(echo ${AUTOSCALABLE_RESOURCE_AND_NS} | awk '{ print $2}')
-    export NS=$(echo ${AUTOSCALABLE_RESOURCE_AND_NS} | awk '{ print $1}')
+    AUTOSCALABLE_RESOURCE=$(echo "${AUTOSCALABLE_RESOURCE_AND_NS}" | awk '{ print $2}')
+    NS=$(echo "${AUTOSCALABLE_RESOURCE_AND_NS}" | awk '{ print $1}')
+    export AUTOSCALABLE_RESOURCE
+    export NS
 
     export HSO_NAME=${AUTOSCALABLE_RESOURCE}
-    export HSO_HOST=$(kubectl get -n${NS} ${AUTOSCALABLE_RESOURCE_KIND} ${AUTOSCALABLE_RESOURCE} -ojson | jq -r '.spec.rules[0].host')
-    export HSO_SVC=$(kubectl get -n${NS} ${AUTOSCALABLE_RESOURCE_KIND} ${AUTOSCALABLE_RESOURCE} -ojson | jq -r '.spec.rules[0].http.paths[0].backend.service.name')
-    export HSO_PORT=$(kubectl get -n${NS} ${AUTOSCALABLE_RESOURCE_KIND} ${AUTOSCALABLE_RESOURCE} -ojson | jq -r '.spec.rules[0].http.paths[0].backend.service.port.number')
+    HSO_HOST=$(kubectl get -n "${NS}" "${AUTOSCALABLE_RESOURCE_KIND}" "${AUTOSCALABLE_RESOURCE}" -ojson | jq -r '.spec.rules[0].host')
+    HSO_SVC=$(kubectl get -n "${NS}" "${AUTOSCALABLE_RESOURCE_KIND}" "${AUTOSCALABLE_RESOURCE}" -ojson | jq -r '.spec.rules[0].http.paths[0].backend.service.name')
+    HSO_PORT=$(kubectl get -n "${NS}" "${AUTOSCALABLE_RESOURCE_KIND}" "${AUTOSCALABLE_RESOURCE}" -ojson | jq -r '.spec.rules[0].http.paths[0].backend.service.port.number')
+    export HSO_HOST
+    export HSO_SVC
+    export HSO_PORT
     ask_for_details
     check_result "${TEMPLATE_FILE}" "${AUTOSCALABLE_RESOURCE_KIND}" "${AUTOSCALABLE_RESOURCE}"
 }
 
 ask_for_details() {
-    export MAX=$(for x in {0..20}; do echo $x; done | fzf --prompt='λ' --cycle --header "Max number of replicas?")
+    MAX=$(for x in {0..20}; do echo "$x"; done | fzf --prompt='λ' --cycle --header "Max number of replicas?")
+    export MAX
 }
 
 check_result() {
     [[ $# -lt 3 ]] && echo "usage: $0 <file_path> <kind> <resource>" && exit 1
-    file_path="$1"
-    cat ${file_path} | envsubst | ${BAT} -lyaml --file-name="hso.yaml"
-    printf "Are you sure to create the HTTPScaledObject for $2 $3 on cluster ${COL}'$(kubectl config current-context)'${RES}\nHit 'e' for modifying the manifest further.\nHit 'p' for printing the manifests to stdout."
+    local file_path="$1"
+    envsubst < "${file_path}" | "${BAT}" -lyaml --file-name="hso.yaml"
+    printf "Are you sure to create the HTTPScaledObject for %s %s on cluster %s'%s'%s\nHit 'e' for modifying the manifest further.\nHit 'p' for printing the manifests to stdout." \
+        "$2" "$3" "$COL" "$(kubectl config current-context)" "$RES"
     echo "[y/N/e/p]?"
-    read -n1 _resp
+    kedify::__read_single_char
+    _resp="${REPLY}"
     [[ $_resp =~ [yY] ]] && {
         # here we apply the manifests
-        cat ${file_path} | envsubst | kubectl apply -f -
+        envsubst < "${file_path}" | kubectl apply -f -
     }
     [[ $_resp =~ [eE] ]] && {
         tmp="$(mktemp).yaml"
-        cat ${file_path} | envsubst > ${tmp}
-        ${EDITOR} ${tmp}
-        check_result ${tmp} ${2} ${3}
+        envsubst < "${file_path}" > "${tmp}"
+        "${EDITOR}" "${tmp}"
+        check_result "${tmp}" "${2}" "${3}"
     }
     [[ $_resp =~ [pP] ]] && {
-        cat ${file_path} | envsubst
+        envsubst < "${file_path}"
     }
     exit 0
 }
 
 install() {
-    [[ $# -gt 2 ]] && [[ "${2}" == --email ]] && {
+    if [[ $# -gt 2 ]] && [[ "${2}" == --email ]]; then
         export EMAIL="${3}"
-    } || {
+    else
         # ask about email
         echo "Please enter your email address:"
-        read -e EMAIL
+        if [[ -n "${BASH_VERSION:-}" ]]; then
+            read -er EMAIL
+        else
+            read -r EMAIL
+        fi
         export EMAIL
         [[ -z $EMAIL ]] && echo "Email can't be empty" && exit 1
-    }
+    fi
     set +e
     AGENT_ID=$(curl -s --request POST --data '{"email": "'"${EMAIL}"'","name":"cli"}' "${API}"/onboarding/create | jq -e -r '.agent_id')
     retVal=$?
     [ $retVal -ne 0 ] && echo "Can't create JWT token: $(curl -s --request POST --data '{"email": "'"${EMAIL}"'","name":"cli"}' "${API}"/onboarding/create|jq -C)" && exit 1
     set -e
     TOKEN=$(curl -s --request POST --data '{"email": "'"${EMAIL}"'","name":"cli"}' "${API}"/onboarding/create | jq -r '.token')
-    if [[ $- == *i* ]] || [[ "${@}" =~ \ -y( |$) ]]; then
+    if [[ $- == *i* ]] || kedify::__has_yes_flag "$@"; then
         _resp="y"
     else # ask only if shell is interactive or -y was passed
-        printf "Do you want to install Kedify on cluster ${COL}'$(kubectl config current-context)'${RES}\nHit 'p' for showing the manifests only."
+        printf "Do you want to install Kedify on cluster %s'%s'%s\nHit 'p' for showing the manifests only." \
+            "$COL" "$(kubectl config current-context)" "$RES"
         echo "[y/N/p]?"
-        read -n1 _resp
+        kedify::__read_single_char
+        _resp="${REPLY}"
     fi
     [[ $_resp =~ [yY] ]] && {
         # here we apply the manifests
@@ -172,20 +279,20 @@ status() {
     clear
     figlet kedify status
     echo -e "\nKedify:\n------"
-    ${KUBECTL} get kedifyconfigurations kedify -owide -nkeda
+    "${KUBECTL}" get kedifyconfigurations kedify -owide -nkeda
     echo -e "\n\nDetailed status\n---------------"
-    ${KUBECTL} get kedifyconfigurations kedify -nkeda -oyaml | yq '.status'
+    "${KUBECTL}" get kedifyconfigurations kedify -nkeda -oyaml | yq '.status'
     echo -e "\n\nPods running in namespace 'keda'\n--------------------------------"
-    ${KUBECTL} get pods -nkeda
-    ${KUBECTL} tree --version &> /dev/null && {
+    "${KUBECTL}" get pods -nkeda
+    "${KUBECTL}" tree --version &> /dev/null && {
         echo -e "\n\nKedify deployments\n------------------"
-        ${KUBECTL} tree kedifyconfigurations.install.kedify.io kedify -n keda
+        "${KUBECTL}" tree kedifyconfigurations.install.kedify.io kedify -n keda
     }
 }
 
 logs() {
     figlet logs
-    ${KUBECTL} logs -lcontrol-plane=kedify-agent -nkeda --tail=-1 $@
+    "${KUBECTL}" logs -lcontrol-plane=kedify-agent -nkeda --tail=-1 "$@"
 }
 
 insights() {
@@ -194,16 +301,18 @@ insights() {
 }
 
 delete() {
-    if [[ $- == *i* ]] || [[ "${@}" =~ \ -y( |$) ]]; then
+    if [[ $- == *i* ]] || kedify::__has_yes_flag "$@"; then
         _resp="y"
     else # ask only if shell is interactive or -y was passed
-        printf "Do you want to uninstall Kedify on cluster ${COL}'$(kubectl config current-context)'${RES}\n"
+        printf "Do you want to uninstall Kedify on cluster %s'%s'%s\n" \
+            "$COL" "$(kubectl config current-context)" "$RES"
         echo "[y/N]?"
-        read -n1 _resp
+        kedify::__read_single_char
+        _resp="${REPLY}"
     fi
     [[ $_resp =~ [yY] ]] && {
         echo -e "\nDeleting Kedify.."
-        ${KUBECTL} delete kedifyconfigurations kedify -nkeda
+        "${KUBECTL}" delete kedifyconfigurations kedify -nkeda
     }
 }
 
@@ -248,11 +357,11 @@ EOF
 }
 
 print_version() {
-  [ "$(uname)" == "Darwin" ] && {
-    cat $(dirname `readlink $0 2> /dev/null` 2> /dev/null)/VERSION 2> /dev/null
-  } || {
-    cat $(dirname `readlink -f $0`)/VERSION
-  }
+  if [[ -r "${VERSION_FILE}" ]]; then
+      cat "${VERSION_FILE}"
+  else
+      echo "unknown"
+  fi
   echo ""
   echo "Latest released versions:"
   echo " - kubectl-kedify: $(curl -sL "https://api.github.com/repos/kedify/kubectl-kedify/releases/latest" | jq -r '.tag_name')"
@@ -266,4 +375,4 @@ cleanup() {
 }
 trap cleanup EXIT 1 2 3 6
 
-main $@
+main "$@"

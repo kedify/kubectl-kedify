@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
-set -Eo functrace
-
 function debug::__failure() {
     local lineno=$1
     local msg=$2
     echo "Failed at $lineno: $msg"
 }
-trap 'debug::__failure ${LINENO} "$BASH_COMMAND"' ERR
+
+function debug::__configure_shell() {
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+        emulate -L ksh
+        setopt typeset_silent
+    fi
+
+    set -euo pipefail
+    if [[ -n "${BASH_VERSION:-}" ]]; then
+        set -E
+        trap 'debug::__failure ${LINENO} "$BASH_COMMAND"' ERR
+    fi
+}
 
 function debug::__aggregate_interceptor_queue() {
     local output_type="$1"
@@ -23,7 +32,7 @@ function debug::__aggregate_interceptor_queue() {
             cmd="yq e -P"
             ;;
         *)
-            cmd="$(debug::__addon_queue_structured_output $mode) | column -t -s $'\t'"
+            cmd="$(debug::__addon_queue_structured_output "$mode") | column -t -s $'\t'"
             ;;            
     esac
     jq -n --arg mode "$mode" '
@@ -193,7 +202,7 @@ function debug::__httpaddon_cmd() {
             if [[ "$watch" == "true" ]]; then
                 while true; do
                     output=$(kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" -o json | jq -r '.items[].metadata.name' | while read -r pod; do
-                        kubectl get --raw "/api/v1/namespaces/$ns/pods/$pod/proxy/queue" | jq -r '. | {name: "'$pod'", queue: .}'
+                        kubectl get --raw "/api/v1/namespaces/$ns/pods/$pod/proxy/queue" | jq -r --arg pod "$pod" '. | {name: $pod, queue: .}'
                     done | debug::__aggregate_interceptor_queue "$output_type" "$mode")
                     clear
                     echo "$(date): HTTP Add-on Queue Status (Press Ctrl+C to stop)"
@@ -203,7 +212,7 @@ function debug::__httpaddon_cmd() {
                 done
             else
                 kubectl get pods -l app.kubernetes.io/name=http-add-on -l app.kubernetes.io/component=interceptor -n "$ns" -o json | jq -r '.items[].metadata.name' | while read -r pod; do
-                    kubectl get --raw "/api/v1/namespaces/$ns/pods/$pod/proxy/queue" | jq -r '. | {name: "'$pod'", queue: .}'
+                    kubectl get --raw "/api/v1/namespaces/$ns/pods/$pod/proxy/queue" | jq -r --arg pod "$pod" '. | {name: $pod, queue: .}'
                 done | debug::__aggregate_interceptor_queue "$output_type" "$mode"
             fi
             ;;
@@ -244,35 +253,65 @@ function debug::__scaledobject() {
     local output_type="$2"
     local print_namespace="$3"
 
-    local so_name=$(echo "$so" | jq --raw-output '.metadata.name')
-    local hpa_name=$(echo "$so" | jq --raw-output '.status.hpaName')
-    local namespace=$(echo "$so" | jq --raw-output '.metadata.namespace')
-    local hpa=$(kubectl get hpa "$hpa_name" -n "$namespace" -o json)
-
-    local triggers=( $(echo "$so" | jq --raw-output '.spec.triggers[].type') )
+    local so_name=""
+    local hpa_name=""
+    local namespace=""
+    local hpa=""
+    local trigger_count=0
     local index_offset=0
-    for i in "${!triggers[@]}"; do
-        local trigger_type=${triggers[$i]}
-        local trigger_name=$(echo "$so" | jq --raw-output ".spec.triggers[$i].name // \""$(debug::__no_trigger "$output_type")"\"")
+    local i=0
+    local default_trigger_name=""
+    local trigger_type=""
+    local trigger_name=""
+    local metric=""
+    local metricType=""
+    local hasStatusCurrentMetrics=""
+    local val=""
+    local hpa_index=0
+    local api=""
+
+    so_name=$(echo "$so" | jq --raw-output '.metadata.name')
+    hpa_name=$(echo "$so" | jq --raw-output '.status.hpaName')
+    namespace=$(echo "$so" | jq --raw-output '.metadata.namespace')
+    hpa=$(kubectl get hpa "$hpa_name" -n "$namespace" -o json)
+    default_trigger_name="$(debug::__no_trigger "$output_type")"
+    trigger_count=$(echo "$so" | jq --raw-output '.spec.triggers | length')
+    while [[ $i -lt $trigger_count ]]; do
+        trigger_type=$(echo "$so" | jq --raw-output ".spec.triggers[$i].type")
+        trigger_name=$(echo "$so" | jq --raw-output --arg default_trigger_name "$default_trigger_name" ".spec.triggers[$i].name // \$default_trigger_name")
         if [[ "$trigger_type" == "cpu" || "$trigger_type" == "memory" ]]; then
             index_offset=$((index_offset + 1))
-            local metric=$trigger_type
-            local metricType=$(echo "$so" | jq --raw-output ".spec.triggers[$i].metricType")
-            local hasStatusCurrentMetrics=$(echo "$hpa" | jq --raw-output '.status.currentMetrics | length')
+            metric=$trigger_type
+            metricType=$(echo "$so" | jq --raw-output ".spec.triggers[$i].metricType")
+            hasStatusCurrentMetrics=$(echo "$hpa" | jq --raw-output '.status.currentMetrics | length')
             if [[ "$hasStatusCurrentMetrics" -eq 0 ]]; then
-                local val="$(debug::__no_value "$output_type")"
+                val="$(debug::__no_value "$output_type")"
             else
-                local val=$(echo "$hpa" | jq --raw-output ".status.currentMetrics[] | select(.resource.name == \"$metric\") | .resource.current.average$metricType")
+                val=$(echo "$hpa" | jq --raw-output ".status.currentMetrics[] | select(.resource.name == \"$metric\") | .resource.current.average$metricType")
             fi
         else
-            local hpa_index=$((i - index_offset)) 
-            local metric=$(echo "$hpa" | jq --raw-output ".spec.metrics[$hpa_index].external.metric.name")
-            local api=/apis/external.metrics.k8s.io/v1beta1/namespaces/"$namespace"/"$metric"?labelSelector=scaledobject.keda.sh%2Fname%3D"$so_name"
-            local val=$(kubectl get --raw $api | jq --raw-output '.items[].value')
+            hpa_index=$((i - index_offset))
+            metric=$(echo "$hpa" | jq --raw-output ".spec.metrics[$hpa_index].external.metric.name")
+            api="/apis/external.metrics.k8s.io/v1beta1/namespaces/${namespace}/${metric}?labelSelector=scaledobject.keda.sh%2Fname%3D${so_name}"
+            val=$(kubectl get --raw "$api" | jq --raw-output '.items[].value')
         fi
         case $output_type in
             json|yaml)
-                echo '{"namespace":"'$namespace'","name":"'$so_name'","triggerName":"'$trigger_name'","triggerType":"'$trigger_type'","metric":"'$metric'","value":'$val'}'
+                jq -cn \
+                    --arg namespace "$namespace" \
+                    --arg name "$so_name" \
+                    --arg trigger_name "$trigger_name" \
+                    --arg trigger_type "$trigger_type" \
+                    --arg metric "$metric" \
+                    --arg value "$val" \
+                    '{
+                        namespace: $namespace,
+                        name: $name,
+                        triggerName: $trigger_name,
+                        triggerType: $trigger_type,
+                        metric: $metric,
+                        value: ($value | tonumber? // .)
+                    }'
                 ;;
             wide)
                 if [[ "$print_namespace" == "true" ]]; then
@@ -289,6 +328,7 @@ function debug::__scaledobject() {
                 fi
                 ;;
         esac
+        i=$((i + 1))
     done
 }
 
@@ -378,7 +418,6 @@ function debug::__execute_scaledobject_once() {
     local filtered_flags=("$@")
 
     local output=""
-    local error_output=""
     if [[ ${#filtered_flags[@]} -eq 0 ]]; then
         if ! output=$(kubectl get scaledobjects -o json 2>&1); then
             echo "Error: Failed to get ScaledObjects. Make sure KEDA is installed and you have the necessary permissions."
@@ -389,7 +428,8 @@ function debug::__execute_scaledobject_once() {
             # Check if it's a "not found" error
             if echo "$output" | grep -q "not found"; then
                 # Extract the resource name from the error message
-                local resource_name=$(echo "$output" | sed -n 's/.*scaledobjects.keda.sh "\([^"]*\)" not found.*/\1/p')
+                local resource_name=""
+                resource_name=$(echo "$output" | sed -n 's/.*scaledobjects.keda.sh "\([^"]*\)" not found.*/\1/p')
                 if [[ -n "$resource_name" ]]; then
                     echo "ScaledObject \"$resource_name\" not found"
                 else
@@ -401,9 +441,10 @@ function debug::__execute_scaledobject_once() {
             exit 1
         fi
     fi
-    local kind=$(echo "$output" | jq -r '.kind')
+    local kind=""
     local formatting_cmd=""
     local header=""
+    kind=$(echo "$output" | jq -r '.kind')
     case $output_type in
         json)
             formatting_cmd="$(debug::__structured_output)"
@@ -449,7 +490,7 @@ esac
 ) | eval "$formatting_cmd"
 }
 
-function debug::cmd() {
+function debug::__cmd_impl() {
     if [[ $# -eq 0 ]]; then
         debug::__print_usage
         exit 1
@@ -469,3 +510,8 @@ function debug::cmd() {
             ;;
     esac
 }
+
+function debug::cmd() (
+    debug::__configure_shell
+    debug::__cmd_impl "$@"
+)

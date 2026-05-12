@@ -304,7 +304,7 @@ function multicluster::__setup_member() {
     if [[ "${dry_run}" == "true" ]]; then
         kubectl "${member_kubectl_context_args[@]}" create namespace "${namespace}" --dry-run=client -o yaml
         echo "---"
-        kubectl "${member_kubectl_context_args[@]}" --namespace "${namespace}" create sa kedify-agent -n "${namespace}" --dry-run=client -o yaml
+        kubectl "${member_kubectl_context_args[@]}" --namespace "${namespace}" create sa kedify-agent --dry-run=client -o yaml
         echo "---"
         cat <<EOF
 apiVersion: v1
@@ -341,7 +341,7 @@ EOF
         exit 0
     else
         kubectl "${member_kubectl_context_args[@]}" create namespace "${namespace}" --dry-run=client -o yaml | kubectl "${member_kubectl_context_args[@]}" apply -f -
-        kubectl "${member_kubectl_context_args[@]}" --namespace "${namespace}" create sa kedify-agent -n "${namespace}" --dry-run=client -o yaml | kubectl "${member_kubectl_context_args[@]}" apply -f -
+        kubectl "${member_kubectl_context_args[@]}" --namespace "${namespace}" create sa kedify-agent --dry-run=client -o yaml | kubectl "${member_kubectl_context_args[@]}" apply -f -
         kubectl "${member_kubectl_context_args[@]}" apply -f - <<EOF
 apiVersion: v1
 kind: Secret
@@ -406,9 +406,6 @@ EOF
         fi
     done
     if [[ -z "$token" ]]; then
-        if [[ "${dry_run}" == "true" ]]; then
-            exit 0
-        fi
         echo "Failed to retrieve token from member cluster after $retries attempts. Ensure that the ServiceAccount and Secret are set up correctly."
         exit 1
     fi

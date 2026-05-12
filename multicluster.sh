@@ -42,7 +42,7 @@ Options:
   --member-context    Context name for the member cluster (optional)
   --member-api-url    API server URL for the member cluster (optional, default: derived from member kubeconfig)
   --namespace         Namespace where KEDA is deployed in the KEDA cluster (optional, default: keda)
-  --dry-run           Print resources/patch payload instead of applying changes (optional)
+  --dry-run           Print resources instead of applying changes (optional)
   --yes               Automatically confirm prompts (optional)
 EOF
 }

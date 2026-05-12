@@ -340,9 +340,9 @@ EOF
         kubectl "${member_kubectl_context_args[@]}" create clusterrolebinding kedify-agent --clusterrole=kedify-agent --serviceaccount="${namespace}":kedify-agent --dry-run=client -o yaml
         exit 0
     else
-    kubectl "${member_kubectl_context_args[@]}" create namespace "${namespace}" --dry-run=client -o yaml | kubectl "${member_kubectl_context_args[@]}" apply -f -
-    kubectl "${member_kubectl_context_args[@]}" --namespace "${namespace}" create sa kedify-agent -n "${namespace}" --dry-run=client -o yaml | kubectl "${member_kubectl_context_args[@]}" apply -f -
-    kubectl "${member_kubectl_context_args[@]}" apply -f - <<EOF
+        kubectl "${member_kubectl_context_args[@]}" create namespace "${namespace}" --dry-run=client -o yaml | kubectl "${member_kubectl_context_args[@]}" apply -f -
+        kubectl "${member_kubectl_context_args[@]}" --namespace "${namespace}" create sa kedify-agent -n "${namespace}" --dry-run=client -o yaml | kubectl "${member_kubectl_context_args[@]}" apply -f -
+        kubectl "${member_kubectl_context_args[@]}" apply -f - <<EOF
 apiVersion: v1
 kind: Secret
 metadata:
@@ -353,7 +353,7 @@ metadata:
 type: kubernetes.io/service-account-token
 EOF
 
-    kubectl "${member_kubectl_context_args[@]}" apply -f - <<EOF
+        kubectl "${member_kubectl_context_args[@]}" apply -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -372,7 +372,7 @@ rules:
   resources: ["jobs"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 EOF
-    kubectl "${member_kubectl_context_args[@]}" create clusterrolebinding kedify-agent --clusterrole=kedify-agent --serviceaccount="${namespace}":kedify-agent --dry-run=client -o yaml | kubectl "${member_kubectl_context_args[@]}" apply -f -
+        kubectl "${member_kubectl_context_args[@]}" create clusterrolebinding kedify-agent --clusterrole=kedify-agent --serviceaccount="${namespace}":kedify-agent --dry-run=client -o yaml | kubectl "${member_kubectl_context_args[@]}" apply -f -
     fi
     # Retrieve the CA certificate and token from the member cluster
     if ! ca=$(kubectl "${member_kubectl_context_args[@]}" get secret kedify-agent-token -n "${namespace}" -o jsonpath="{.data['ca\.crt']}" 2>/dev/null); then

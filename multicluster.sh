@@ -98,21 +98,20 @@ function multicluster::__list_members() {
         exit 1
     fi
 
-    if ! kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs > /dev/null 2>&1; then
-        echo "No member clusters are configured in KEDA cluster, secret 'kedify-agent-multicluster-kubeconfigs' not found."
-        exit 1
-    fi
-
-    local members_list
-    members_list=$(
-        kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs -o jsonpath="{.data}" |
-            jq -r 'keys[] | sub("-cluster\\.kubeconfig$"; "")'
-    )
-
+    # Source the inventory from KedifyConfiguration's multiClusterStatus —
+    # the agent merges file-mounted and Secret-registered providers there, so
+    # this is the only view that covers both registration paths.
     local multi_cluster_status="{}"
     local kedify_config_json
     if kedify_config_json=$(kubectl -n "${namespace}" --context="${keda_context}" get kedifyconfigurations -o json 2>/dev/null); then
         multi_cluster_status=$(echo "${kedify_config_json}" | jq -c '.items | map(select(.status.multiClusterStatus.clusters != null) | .status.multiClusterStatus.clusters) | first // {}')
+    fi
+
+    local members_list
+    members_list=$(echo "${multi_cluster_status}" | jq -r 'keys[]?' | sort)
+    if [[ -z "${members_list}" ]]; then
+        echo "No member clusters are configured in the KEDA cluster."
+        exit 1
     fi
 
     local member

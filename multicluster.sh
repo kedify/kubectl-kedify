@@ -379,9 +379,6 @@ EOF
         ca=""
     fi
     if [[ -z "$ca" ]]; then
-        if [[ "${dry_run}" == "true" ]]; then
-            exit 0
-        fi
         echo "Failed to retrieve CA certificate from member cluster. Ensure that the ServiceAccount and Secret are set up correctly."
         exit 1
     fi

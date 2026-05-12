@@ -42,6 +42,7 @@ Options:
   --member-context    Context name for the member cluster (optional)
   --member-api-url    API server URL for the member cluster (optional, default: derived from member kubeconfig)
   --namespace         Namespace where KEDA is deployed in the KEDA cluster (optional, default: keda)
+  --dry-run           Print member-cluster resources instead of applying changes (optional)
   --yes               Automatically confirm prompts (optional)
 EOF
 }
@@ -228,6 +229,8 @@ function multicluster::__setup_member() {
     local ca=""
     local server=""
     local selected_context=""
+    local dry_run="false"
+    local member_kubectl_context_args=()
 
     if [[ $# -eq 0 ]]; then
         echo "Member name is required for setup-member command."
@@ -276,6 +279,10 @@ function multicluster::__setup_member() {
                 auto_confirm="true"
                 shift
                 ;;
+            --dry-run)
+                dry_run="true"
+                shift
+                ;;
             *)
                 echo "Unknown option: $1"
                 multicluster::__print_usage_setup_member
@@ -291,9 +298,15 @@ function multicluster::__setup_member() {
     fi
 
     export KUBECONFIG="${member_kubeconfig}"
-    kubectl --context="${member_context}" create namespace "${namespace}" --dry-run=client -o yaml | kubectl --context="${member_context}" apply -f -
-    kubectl --context="${member_context}" --namespace "${namespace}" create sa kedify-agent -n "${namespace}" --dry-run=client -o yaml | kubectl --context="${member_context}" apply -f -
-    kubectl --context="${member_context}" apply -f - <<EOF
+    if [[ -n "${member_context}" ]]; then
+        member_kubectl_context_args=(--context="${member_context}")
+    fi
+    if [[ "${dry_run}" == "true" ]]; then
+        kubectl "${member_kubectl_context_args[@]}" create namespace "${namespace}" --dry-run=client -o yaml
+        echo "---"
+        kubectl "${member_kubectl_context_args[@]}" --namespace "${namespace}" create sa kedify-agent --dry-run=client -o yaml
+        echo "---"
+        cat <<EOF
 apiVersion: v1
 kind: Secret
 metadata:
@@ -303,8 +316,8 @@ metadata:
     kubernetes.io/service-account.name: kedify-agent
 type: kubernetes.io/service-account-token
 EOF
-
-    kubectl --context="${member_context}" apply -f - <<EOF
+        echo "---"
+        cat <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -323,9 +336,48 @@ rules:
   resources: ["jobs"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 EOF
-    kubectl --context="${member_context}" create clusterrolebinding kedify-agent --clusterrole=kedify-agent --serviceaccount="${namespace}":kedify-agent --dry-run=client -o yaml | kubectl --context="${member_context}" apply -f -
+        echo "---"
+        kubectl "${member_kubectl_context_args[@]}" create clusterrolebinding kedify-agent --clusterrole=kedify-agent --serviceaccount="${namespace}":kedify-agent --dry-run=client -o yaml
+        exit 0
+    else
+        kubectl "${member_kubectl_context_args[@]}" create namespace "${namespace}" --dry-run=client -o yaml | kubectl "${member_kubectl_context_args[@]}" apply -f -
+        kubectl "${member_kubectl_context_args[@]}" --namespace "${namespace}" create sa kedify-agent --dry-run=client -o yaml | kubectl "${member_kubectl_context_args[@]}" apply -f -
+        kubectl "${member_kubectl_context_args[@]}" apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kedify-agent-token
+  namespace: ${namespace}
+  annotations:
+    kubernetes.io/service-account.name: kedify-agent
+type: kubernetes.io/service-account-token
+EOF
+
+        kubectl "${member_kubectl_context_args[@]}" apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kedify-agent
+rules:
+- apiGroups: ["*"]
+  resources: ["*/scale"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+EOF
+        kubectl "${member_kubectl_context_args[@]}" create clusterrolebinding kedify-agent --clusterrole=kedify-agent --serviceaccount="${namespace}":kedify-agent --dry-run=client -o yaml | kubectl "${member_kubectl_context_args[@]}" apply -f -
+    fi
     # Retrieve the CA certificate and token from the member cluster
-    ca=$(kubectl --context="${member_context}" get secret kedify-agent-token -n "${namespace}" -o jsonpath="{.data['ca\.crt']}")
+    if ! ca=$(kubectl "${member_kubectl_context_args[@]}" get secret kedify-agent-token -n "${namespace}" -o jsonpath="{.data['ca\.crt']}" 2>/dev/null); then
+        ca=""
+    fi
     if [[ -z "$ca" ]]; then
         echo "Failed to retrieve CA certificate from member cluster. Ensure that the ServiceAccount and Secret are set up correctly."
         exit 1
@@ -337,7 +389,7 @@ EOF
     local raw=""
 
     for ((attempt=1; attempt<=retries; attempt++)); do
-        if raw=$(kubectl --context="${member_context}" get secret kedify-agent-token -n "${namespace}" -o jsonpath="{.data['token']}" | base64 --decode); then
+        if raw=$(kubectl "${member_kubectl_context_args[@]}" get secret kedify-agent-token -n "${namespace}" -o jsonpath="{.data['token']}" | base64 --decode); then
             if [[ -n "$raw" ]]; then
                 token="$raw"
                 break
@@ -460,3 +512,7 @@ function multicluster::cmd() (
     multicluster::__configure_shell
     multicluster::__cmd_impl "$@"
 )
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    multicluster::cmd "$@"
+fi

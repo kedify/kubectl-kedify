@@ -197,10 +197,20 @@ function multicluster::__delete_member() {
     while [[ $# -gt 0 ]]; do
         case $1 in
             --namespace|-n)
+                if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then
+                    echo "$1 requires a value."
+                    multicluster::__print_usage_delete_member
+                    exit 1
+                fi
                 namespace=$2
                 shift 2
                 ;;
             --keda-context)
+                if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then
+                    echo "$1 requires a value."
+                    multicluster::__print_usage_delete_member
+                    exit 1
+                fi
                 keda_context=$2
                 shift 2
                 ;;
@@ -262,7 +272,7 @@ function multicluster::__delete_member() {
         echo "Failed to read Secret '${member_name}' from the KEDA cluster." >&2
         exit 1
     fi
-    if [[ -n "${labeled_json}" ]] && printf '%s' "${labeled_json}" | jq -e '.metadata.labels["sigs.k8s.io/multicluster-runtime-kubeconfig"] == "true"' > /dev/null; then
+    if [[ -n "${labeled_json}" ]] && printf '%s' "${labeled_json}" | jq -e '(.metadata.labels // {})["sigs.k8s.io/multicluster-runtime-kubeconfig"] == "true"' > /dev/null; then
         in_labeled="true"
     fi
 

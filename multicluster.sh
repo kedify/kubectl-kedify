@@ -102,14 +102,17 @@ function multicluster::__list_members() {
     # Source the inventory from KedifyConfiguration's multiClusterStatus —
     # the agent merges file-mounted and Secret-registered providers there, so
     # this is the only view that covers both registration paths.
+    # Use printf '%s' rather than echo when piping to jq: bash's `echo` can
+    # interpret embedded backslash sequences (e.g. \n inside a JSON-escaped
+    # annotation value) which mangles the payload before jq sees it.
     local multi_cluster_status="{}"
     local kedify_config_json
     if kedify_config_json=$(kubectl -n "${namespace}" --context="${keda_context}" get kedifyconfigurations -o json 2>/dev/null); then
-        multi_cluster_status=$(echo "${kedify_config_json}" | jq -c '.items | map(select(.status.multiClusterStatus.clusters != null) | .status.multiClusterStatus.clusters) | first // {}')
+        multi_cluster_status=$(printf '%s' "${kedify_config_json}" | jq -c '.items | map(select(.status.multiClusterStatus.clusters != null) | .status.multiClusterStatus.clusters) | first // {}')
     fi
 
     local members_list
-    members_list=$(echo "${multi_cluster_status}" | jq -r 'keys[]?' | sort)
+    members_list=$(printf '%s' "${multi_cluster_status}" | jq -r 'keys[]?' | sort)
     if [[ -z "${members_list}" ]]; then
         echo "No member clusters are configured in the KEDA cluster."
         exit 1
@@ -126,8 +129,8 @@ function multicluster::__list_members() {
     while IFS= read -r member; do
         [[ -z "${member}" ]] && continue
 
-        state=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].state // "Unknown"')
-        provider=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].provider // "unknown"')
+        state=$(printf '%s' "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].state // "Unknown"')
+        provider=$(printf '%s' "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].provider // "unknown"')
 
         if (( ${#member} > cluster_width )); then
             cluster_width=${#member}
@@ -151,9 +154,9 @@ EOF
     while IFS= read -r member; do
         [[ -z "${member}" ]] && continue
 
-        state=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].state // "Unknown"')
-        provider=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].provider // "unknown"')
-        info=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].info // "missing status information"')
+        state=$(printf '%s' "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].state // "Unknown"')
+        provider=$(printf '%s' "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].provider // "unknown"')
+        info=$(printf '%s' "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].info // "missing status information"')
 
         if [[ "${output_format}" == "wide" ]]; then
             printf "%-${cluster_width}s  %-${state_width}s  %-${provider_width}s  %s\n" "${member}" "${state}" "${provider}" "${info}"

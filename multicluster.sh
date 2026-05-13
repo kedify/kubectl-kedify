@@ -205,6 +205,11 @@ function multicluster::__delete_member() {
                 shift 2
                 ;;
             --provider)
+                if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then
+                    echo "--provider requires a value (file or kubeconfig)."
+                    multicluster::__print_usage_delete_member
+                    exit 1
+                fi
                 provider_flag=$2
                 shift 2
                 ;;
@@ -246,7 +251,9 @@ function multicluster::__delete_member() {
         echo "Failed to read Secret 'kedify-agent-multicluster-kubeconfigs' from the KEDA cluster." >&2
         exit 1
     fi
-    if [[ -n "${bundled_json}" ]] && printf '%s' "${bundled_json}" | jq -e --arg key "${bundled_data_key}" '.data[$key] != null' > /dev/null; then
+    # Null-safe access in case the Secret exists but has an empty/absent .data
+    # (happens after the last member entry is removed).
+    if [[ -n "${bundled_json}" ]] && printf '%s' "${bundled_json}" | jq -e --arg key "${bundled_data_key}" '(.data // {})[$key] != null' > /dev/null; then
         in_bundled="true"
     fi
 

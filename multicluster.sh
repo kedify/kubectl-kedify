@@ -192,16 +192,44 @@ function multicluster::__delete_member() {
         esac
     done
 
-    if ! kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs > /dev/null 2>&1; then
-        echo "No member clusters are configured in KEDA cluster, secret 'kedify-agent-multicluster-kubeconfigs' not found."
+    # A member can be registered through either the file provider (an entry in
+    # the bundled `kedify-agent-multicluster-kubeconfigs` Secret) or the
+    # kubeconfig provider (a per-cluster Secret named after the member, labeled
+    # `sigs.k8s.io/multicluster-runtime-kubeconfig=true`). Detect both before
+    # deciding what to remove; same member name can be registered through both
+    # at once (cross-provider collision).
+    local in_bundled="false"
+    local in_labeled="false"
+    local bundled_data_key="${member_name}-cluster.kubeconfig"
+
+    if kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs -o json 2>/dev/null \
+        | jq -e --arg key "${bundled_data_key}" '.data[$key] != null' > /dev/null; then
+        in_bundled="true"
+    fi
+    if kubectl -n "${namespace}" --context="${keda_context}" get secret "${member_name}" -o json 2>/dev/null \
+        | jq -e '.metadata.labels["sigs.k8s.io/multicluster-runtime-kubeconfig"] == "true"' > /dev/null; then
+        in_labeled="true"
+    fi
+
+    if [[ "${in_bundled}" == "false" && "${in_labeled}" == "false" ]]; then
+        echo "Member cluster '${member_name}' is not registered in KEDA cluster (checked bundled Secret 'kedify-agent-multicluster-kubeconfigs' and labeled Secret '${member_name}')."
         exit 1
     fi
-    if ! kubectl --context="${keda_context}" -n "${namespace}" get secret kedify-agent-multicluster-kubeconfigs -o json | jq -e --arg key "${member_name}-cluster.kubeconfig" '.data[$key]' > /dev/null; then
-        echo "Member cluster '${member_name}' does not exist in KEDA cluster."
-        exit 1
+
+    local -a sources=()
+    [[ "${in_bundled}" == "true" ]] && sources+=("bundled Secret 'kedify-agent-multicluster-kubeconfigs' (file provider)")
+    [[ "${in_labeled}" == "true" ]] && sources+=("labeled Secret '${member_name}' (kubeconfig provider)")
+    if [[ ${#sources[@]} -gt 1 ]]; then
+        echo "Member cluster '${member_name}' is registered through multiple providers; both entries will be removed:"
+    else
+        echo "Member cluster '${member_name}' will be removed from:"
     fi
+    for s in "${sources[@]}"; do
+        echo "  - ${s}"
+    done
+
     if [[ "${auto_confirm}" != "true" ]]; then
-        echo "Are you sure you want to delete member cluster '${member_name}'? (y/n)"
+        echo "Continue? (y/n)"
         read -r answer
         if [[ "${answer}" != "y" ]]; then
             echo "Aborting deletion of member cluster '${member_name}'."
@@ -209,8 +237,13 @@ function multicluster::__delete_member() {
         fi
     fi
 
-    kubectl -n "${namespace}" patch secret kedify-agent-multicluster-kubeconfigs --type=json \
-        -p="[{'op':'remove','path':'/data/${member_name}-cluster.kubeconfig'}]"
+    if [[ "${in_bundled}" == "true" ]]; then
+        kubectl -n "${namespace}" --context="${keda_context}" patch secret kedify-agent-multicluster-kubeconfigs --type=json \
+            -p="[{'op':'remove','path':'/data/${bundled_data_key}'}]"
+    fi
+    if [[ "${in_labeled}" == "true" ]]; then
+        kubectl -n "${namespace}" --context="${keda_context}" delete secret "${member_name}"
+    fi
 
     echo "Member cluster '${member_name}' has been deleted successfully."
 }

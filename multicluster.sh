@@ -105,11 +105,16 @@ function multicluster::__list_members() {
     # Use printf '%s' rather than echo when piping to jq: bash's `echo` can
     # interpret embedded backslash sequences (e.g. \n inside a JSON-escaped
     # annotation value) which mangles the payload before jq sees it.
+    # Let kubectl errors (CRD missing, RBAC denied, bad context, etc.) print
+    # naturally to stderr — falling back to empty would mask real failures
+    # as "no members configured".
     local multi_cluster_status="{}"
     local kedify_config_json
-    if kedify_config_json=$(kubectl -n "${namespace}" --context="${keda_context}" get kedifyconfigurations -o json 2>/dev/null); then
-        multi_cluster_status=$(printf '%s' "${kedify_config_json}" | jq -c '.items | map(select(.status.multiClusterStatus.clusters != null) | .status.multiClusterStatus.clusters) | first // {}')
+    if ! kedify_config_json=$(kubectl -n "${namespace}" --context="${keda_context}" get kedifyconfigurations -o json); then
+        echo "Failed to read KedifyConfiguration resources from the KEDA cluster." >&2
+        exit 1
     fi
+    multi_cluster_status=$(printf '%s' "${kedify_config_json}" | jq -c '.items | map(select(.status.multiClusterStatus.clusters != null) | .status.multiClusterStatus.clusters) | first // {}')
 
     local members_list
     members_list=$(printf '%s' "${multi_cluster_status}" | jq -r 'keys[]?' | sort)
@@ -179,6 +184,13 @@ function multicluster::__delete_member() {
     if [[ -z "${member_name}" ]]; then
         echo "Member name is required for delete-member command."
         multicluster::__print_usage_delete_member
+        exit 1
+    fi
+    # Same constraint setup-member enforces. Guards both the Secret name path
+    # and the JSON Pointer used in the bundled-Secret patch (where `/` and `~`
+    # have special meaning).
+    if [[ ! "${member_name}" =~ ^[a-z]([a-z0-9-]*[a-z0-9])?$ ]]; then
+        echo "Member name '${member_name}' contains invalid characters. Only lowercase alphanumeric characters and hyphens are allowed, starting with a letter."
         exit 1
     fi
 
@@ -287,8 +299,12 @@ function multicluster::__delete_member() {
     fi
 
     if [[ "${delete_bundled}" == "true" ]]; then
-        kubectl -n "${namespace}" --context="${keda_context}" patch secret kedify-agent-multicluster-kubeconfigs --type=json \
-            -p="[{'op':'remove','path':'/data/${bundled_data_key}'}]"
+        # JSON Patch payload must be valid JSON (double-quoted keys/values).
+        # member_name is validated against the DNS-label regex above, so it
+        # contains no JSON Pointer special characters (`/`, `~`).
+        local patch_json
+        patch_json=$(printf '[{"op":"remove","path":"/data/%s"}]' "${bundled_data_key}")
+        kubectl -n "${namespace}" --context="${keda_context}" patch secret kedify-agent-multicluster-kubeconfigs --type=json -p "${patch_json}"
     fi
     if [[ "${delete_labeled}" == "true" ]]; then
         kubectl -n "${namespace}" --context="${keda_context}" delete secret "${member_name}"

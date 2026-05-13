@@ -58,7 +58,7 @@ EOF
 
 function multicluster::__print_usage_delete_member() {
     cat <<EOF
-Usage: multicluster delete-member <member-name> [--namespace <namespace>] [--provider <file|kubeconfig>] [--yes]
+Usage: multicluster delete-member <member-name> [--namespace <namespace>] [--keda-context <context>] [--provider <file|kubeconfig>] [--yes]
 Options:
   --namespace         Namespace where KEDA is deployed in the KEDA cluster (optional, default: keda)
   --keda-context      Context name for the KEDA cluster (optional)
@@ -232,16 +232,30 @@ function multicluster::__delete_member() {
     # deciding what to remove. Same member name can be registered through both
     # at once (cross-provider collision); in that case the operator must
     # disambiguate with --provider.
+    #
+    # `--ignore-not-found=true` is the discriminator we want: kubectl exits 0
+    # with empty stdout only when the resource genuinely does not exist; real
+    # errors (RBAC denied, API unreachable, bad context, etc.) still surface
+    # on stderr and exit non-zero rather than masquerading as "not registered".
     local in_bundled="false"
     local in_labeled="false"
     local bundled_data_key="${member_name}-cluster.kubeconfig"
 
-    if kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs -o json 2>/dev/null \
-        | jq -e --arg key "${bundled_data_key}" '.data[$key] != null' > /dev/null; then
+    local bundled_json
+    if ! bundled_json=$(kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs --ignore-not-found=true -o json); then
+        echo "Failed to read Secret 'kedify-agent-multicluster-kubeconfigs' from the KEDA cluster." >&2
+        exit 1
+    fi
+    if [[ -n "${bundled_json}" ]] && printf '%s' "${bundled_json}" | jq -e --arg key "${bundled_data_key}" '.data[$key] != null' > /dev/null; then
         in_bundled="true"
     fi
-    if kubectl -n "${namespace}" --context="${keda_context}" get secret "${member_name}" -o json 2>/dev/null \
-        | jq -e '.metadata.labels["sigs.k8s.io/multicluster-runtime-kubeconfig"] == "true"' > /dev/null; then
+
+    local labeled_json
+    if ! labeled_json=$(kubectl -n "${namespace}" --context="${keda_context}" get secret "${member_name}" --ignore-not-found=true -o json); then
+        echo "Failed to read Secret '${member_name}' from the KEDA cluster." >&2
+        exit 1
+    fi
+    if [[ -n "${labeled_json}" ]] && printf '%s' "${labeled_json}" | jq -e '.metadata.labels["sigs.k8s.io/multicluster-runtime-kubeconfig"] == "true"' > /dev/null; then
         in_labeled="true"
     fi
 

@@ -326,12 +326,18 @@ function multicluster::__delete_member() {
         local patch_json
         patch_json=$(printf '[{"op":"remove","path":"/data/%s"}]' "${bundled_data_key}")
         kubectl -n "${namespace}" --context="${keda_context}" patch secret kedify-agent-multicluster-kubeconfigs --type=json -p "${patch_json}"
+        echo "Removed bundled-Secret entry for member cluster '${member_name}' (file provider)."
+        if [[ "${in_labeled}" == "true" ]]; then
+            echo "Note: the kubeconfig-provider entry for '${member_name}' remains; the cluster is still registered via the kubeconfig provider."
+        fi
     fi
     if [[ "${delete_labeled}" == "true" ]]; then
         kubectl -n "${namespace}" --context="${keda_context}" delete secret "${member_name}"
+        echo "Removed labeled Secret '${member_name}' (kubeconfig provider)."
+        if [[ "${in_bundled}" == "true" ]]; then
+            echo "Note: the file-provider entry for '${member_name}' remains; the cluster is still registered via the file provider."
+        fi
     fi
-
-    echo "Member cluster '${member_name}' has been deleted successfully."
 }
 
 function multicluster::__setup_member() {

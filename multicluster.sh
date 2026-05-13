@@ -59,10 +59,11 @@ EOF
 
 function multicluster::__print_usage_delete_member() {
     cat <<EOF
-Usage: multicluster delete-member <member-name> [--namespace <namespace>] [--yes]
+Usage: multicluster delete-member <member-name> [--namespace <namespace>] [--keda-context <context>] [--provider <file|kubeconfig>] [--yes]
 Options:
   --namespace         Namespace where KEDA is deployed in the KEDA cluster (optional, default: keda)
   --keda-context      Context name for the KEDA cluster (optional)
+  --provider          Which provider's entry to delete (optional). Required only when the member is registered through both providers (collision). Values: file, kubeconfig.
   --yes               Automatically confirm prompts (optional)
 EOF
 }
@@ -99,33 +100,43 @@ function multicluster::__list_members() {
         exit 1
     fi
 
-    if ! kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs > /dev/null 2>&1; then
-        echo "No member clusters are configured in KEDA cluster, secret 'kedify-agent-multicluster-kubeconfigs' not found."
-        exit 1
-    fi
-
-    local members_list
-    members_list=$(
-        kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs -o jsonpath="{.data}" |
-            jq -r 'keys[] | sub("-cluster\\.kubeconfig$"; "")'
-    )
-
+    # Source the inventory from KedifyConfiguration's multiClusterStatus —
+    # the agent merges file-mounted and Secret-registered providers there, so
+    # this is the only view that covers both registration paths.
+    # Use printf '%s' rather than echo when piping to jq: bash's `echo` can
+    # interpret embedded backslash sequences (e.g. \n inside a JSON-escaped
+    # annotation value) which mangles the payload before jq sees it.
+    # Let kubectl errors (CRD missing, RBAC denied, bad context, etc.) print
+    # naturally to stderr — falling back to empty would mask real failures
+    # as "no members configured".
     local multi_cluster_status="{}"
     local kedify_config_json
-    if kedify_config_json=$(kubectl -n "${namespace}" --context="${keda_context}" get kedifyconfigurations -o json 2>/dev/null); then
-        multi_cluster_status=$(echo "${kedify_config_json}" | jq -c '.items | map(select(.status.multiClusterStatus.clusters != null) | .status.multiClusterStatus.clusters) | first // {}')
+    if ! kedify_config_json=$(kubectl -n "${namespace}" --context="${keda_context}" get kedifyconfigurations -o json); then
+        echo "Failed to read KedifyConfiguration resources from the KEDA cluster." >&2
+        exit 1
+    fi
+    multi_cluster_status=$(printf '%s' "${kedify_config_json}" | jq -c '.items | map(select(.status.multiClusterStatus.clusters != null) | .status.multiClusterStatus.clusters) | first // {}')
+
+    local members_list
+    members_list=$(printf '%s' "${multi_cluster_status}" | jq -r 'keys[]?' | sort)
+    if [[ -z "${members_list}" ]]; then
+        echo "No member clusters are configured in the KEDA cluster."
+        exit 1
     fi
 
     local member
     local state=""
+    local provider=""
     local info=""
     local cluster_width=7
     local state_width=5
+    local provider_width=8
 
     while IFS= read -r member; do
         [[ -z "${member}" ]] && continue
 
-        state=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].state // "Unknown"')
+        state=$(printf '%s' "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].state // "Unknown"')
+        provider=$(printf '%s' "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].provider // "unknown"')
 
         if (( ${#member} > cluster_width )); then
             cluster_width=${#member}
@@ -133,12 +144,15 @@ function multicluster::__list_members() {
         if (( ${#state} > state_width )); then
             state_width=${#state}
         fi
+        if (( ${#provider} > provider_width )); then
+            provider_width=${#provider}
+        fi
     done <<EOF
 ${members_list}
 EOF
 
     if [[ "${output_format}" == "wide" ]]; then
-        printf "%-${cluster_width}s  %-${state_width}s  %s\n" "CLUSTER" "STATE" "INFO"
+        printf "%-${cluster_width}s  %-${state_width}s  %-${provider_width}s  %s\n" "CLUSTER" "STATE" "PROVIDER" "INFO"
     else
         printf "%-${cluster_width}s  %s\n" "CLUSTER" "STATE"
     fi
@@ -146,11 +160,12 @@ EOF
     while IFS= read -r member; do
         [[ -z "${member}" ]] && continue
 
-        state=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].state // "Unknown"')
-        info=$(echo "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].info // "missing status information"')
+        state=$(printf '%s' "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].state // "Unknown"')
+        provider=$(printf '%s' "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].provider // "unknown"')
+        info=$(printf '%s' "${multi_cluster_status}" | jq -r --arg member "${member}" '.[$member].info // "missing status information"')
 
         if [[ "${output_format}" == "wide" ]]; then
-            printf "%-${cluster_width}s  %-${state_width}s  %s\n" "${member}" "${state}" "${info}"
+            printf "%-${cluster_width}s  %-${state_width}s  %-${provider_width}s  %s\n" "${member}" "${state}" "${provider}" "${info}"
         else
             printf "%-${cluster_width}s  %s\n" "${member}" "${state}"
         fi
@@ -165,21 +180,48 @@ function multicluster::__delete_member() {
     local namespace="keda"
     local auto_confirm="false"
     local keda_context=""
+    local provider_flag=""
 
     if [[ -z "${member_name}" ]]; then
         echo "Member name is required for delete-member command."
         multicluster::__print_usage_delete_member
         exit 1
     fi
+    # Same constraint setup-member enforces. Guards both the Secret name path
+    # and the JSON Pointer used in the bundled-Secret patch (where `/` and `~`
+    # have special meaning).
+    if [[ ! "${member_name}" =~ ^[a-z]([a-z0-9-]*[a-z0-9])?$ ]]; then
+        echo "Member name '${member_name}' is not a valid DNS label. It must start with a lowercase letter, end with a lowercase letter or digit, and only contain lowercase letters, digits, and hyphens."
+        exit 1
+    fi
 
     while [[ $# -gt 0 ]]; do
         case $1 in
             --namespace|-n)
+                if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then
+                    echo "$1 requires a value."
+                    multicluster::__print_usage_delete_member
+                    exit 1
+                fi
                 namespace=$2
                 shift 2
                 ;;
             --keda-context)
+                if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then
+                    echo "$1 requires a value."
+                    multicluster::__print_usage_delete_member
+                    exit 1
+                fi
                 keda_context=$2
+                shift 2
+                ;;
+            --provider)
+                if [[ -z "${2:-}" || "${2:0:1}" == "-" ]]; then
+                    echo "--provider requires a value (file or kubeconfig)."
+                    multicluster::__print_usage_delete_member
+                    exit 1
+                fi
+                provider_flag=$2
                 shift 2
                 ;;
             --yes|-y)
@@ -194,16 +236,93 @@ function multicluster::__delete_member() {
         esac
     done
 
-    if ! kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs > /dev/null 2>&1; then
-        echo "No member clusters are configured in KEDA cluster, secret 'kedify-agent-multicluster-kubeconfigs' not found."
+    if [[ -n "${provider_flag}" && "${provider_flag}" != "file" && "${provider_flag}" != "kubeconfig" ]]; then
+        echo "Invalid --provider value '${provider_flag}'. Supported: file, kubeconfig."
         exit 1
     fi
-    if ! kubectl --context="${keda_context}" -n "${namespace}" get secret kedify-agent-multicluster-kubeconfigs -o json | jq -e --arg key "${member_name}-cluster.kubeconfig" '.data[$key]' > /dev/null; then
-        echo "Member cluster '${member_name}' does not exist in KEDA cluster."
+
+    # A member can be registered through either the file provider (an entry in
+    # the bundled `kedify-agent-multicluster-kubeconfigs` Secret) or the
+    # kubeconfig provider (a per-cluster Secret named after the member, labeled
+    # `sigs.k8s.io/multicluster-runtime-kubeconfig=true`). Detect both before
+    # deciding what to remove. Same member name can be registered through both
+    # at once (cross-provider collision); in that case the operator must
+    # disambiguate with --provider.
+    #
+    # `--ignore-not-found=true` is the discriminator we want: kubectl exits 0
+    # with empty stdout only when the resource genuinely does not exist; real
+    # errors (RBAC denied, API unreachable, bad context, etc.) still surface
+    # on stderr and exit non-zero rather than masquerading as "not registered".
+    local in_bundled="false"
+    local in_labeled="false"
+    local bundled_data_key="${member_name}-cluster.kubeconfig"
+
+    local bundled_json
+    if ! bundled_json=$(kubectl -n "${namespace}" --context="${keda_context}" get secret kedify-agent-multicluster-kubeconfigs --ignore-not-found=true -o json); then
+        echo "Failed to read Secret 'kedify-agent-multicluster-kubeconfigs' from the KEDA cluster." >&2
         exit 1
+    fi
+    # Null-safe access in case the Secret exists but has an empty/absent .data
+    # (happens after the last member entry is removed).
+    if [[ -n "${bundled_json}" ]] && printf '%s' "${bundled_json}" | jq -e --arg key "${bundled_data_key}" '(.data // {})[$key] != null' > /dev/null; then
+        in_bundled="true"
+    fi
+
+    local labeled_json
+    if ! labeled_json=$(kubectl -n "${namespace}" --context="${keda_context}" get secret "${member_name}" --ignore-not-found=true -o json); then
+        echo "Failed to read Secret '${member_name}' from the KEDA cluster." >&2
+        exit 1
+    fi
+    if [[ -n "${labeled_json}" ]] && printf '%s' "${labeled_json}" | jq -e '(.metadata.labels // {})["sigs.k8s.io/multicluster-runtime-kubeconfig"] == "true"' > /dev/null; then
+        in_labeled="true"
+    fi
+
+    if [[ "${in_bundled}" == "false" && "${in_labeled}" == "false" ]]; then
+        echo "Member cluster '${member_name}' is not registered in KEDA cluster (checked bundled Secret 'kedify-agent-multicluster-kubeconfigs' and labeled Secret '${member_name}')."
+        exit 1
+    fi
+
+    if [[ "${in_bundled}" == "true" && "${in_labeled}" == "true" && -z "${provider_flag}" ]]; then
+        echo "Member cluster '${member_name}' is registered through both providers:"
+        echo "  - bundled Secret 'kedify-agent-multicluster-kubeconfigs' (file provider)"
+        echo "  - labeled Secret '${member_name}' (kubeconfig provider)"
+        echo "Specify which one to delete with --provider <file|kubeconfig>."
+        exit 1
+    fi
+
+    if [[ "${provider_flag}" == "file" && "${in_bundled}" == "false" ]]; then
+        echo "Member cluster '${member_name}' is not registered through the file provider (no entry in bundled Secret 'kedify-agent-multicluster-kubeconfigs')."
+        exit 1
+    fi
+    if [[ "${provider_flag}" == "kubeconfig" && "${in_labeled}" == "false" ]]; then
+        echo "Member cluster '${member_name}' is not registered through the kubeconfig provider (no labeled Secret '${member_name}')."
+        exit 1
+    fi
+
+    local delete_bundled="false"
+    local delete_labeled="false"
+    case "${provider_flag}" in
+        file)
+            delete_bundled="true"
+            ;;
+        kubeconfig)
+            delete_labeled="true"
+            ;;
+        *)
+            # No flag and no collision: delete whichever single provider has it.
+            delete_bundled="${in_bundled}"
+            delete_labeled="${in_labeled}"
+            ;;
+    esac
+
+    if [[ "${delete_bundled}" == "true" ]]; then
+        echo "Member cluster '${member_name}' will be removed from bundled Secret 'kedify-agent-multicluster-kubeconfigs' (file provider)."
+    fi
+    if [[ "${delete_labeled}" == "true" ]]; then
+        echo "Member cluster '${member_name}' will be removed by deleting labeled Secret '${member_name}' (kubeconfig provider)."
     fi
     if [[ "${auto_confirm}" != "true" ]]; then
-        echo "Are you sure you want to delete member cluster '${member_name}'? (y/n)"
+        echo "Continue? (y/n)"
         read -r answer
         if [[ "${answer}" != "y" ]]; then
             echo "Aborting deletion of member cluster '${member_name}'."
@@ -211,10 +330,25 @@ function multicluster::__delete_member() {
         fi
     fi
 
-    kubectl -n "${namespace}" patch secret kedify-agent-multicluster-kubeconfigs --type=json \
-        -p="[{'op':'remove','path':'/data/${member_name}-cluster.kubeconfig'}]"
-
-    echo "Member cluster '${member_name}' has been deleted successfully."
+    if [[ "${delete_bundled}" == "true" ]]; then
+        # JSON Patch payload must be valid JSON (double-quoted keys/values).
+        # member_name is validated against the DNS-label regex above, so it
+        # contains no JSON Pointer special characters (`/`, `~`).
+        local patch_json
+        patch_json=$(printf '[{"op":"remove","path":"/data/%s"}]' "${bundled_data_key}")
+        kubectl -n "${namespace}" --context="${keda_context}" patch secret kedify-agent-multicluster-kubeconfigs --type=json -p "${patch_json}"
+        echo "Removed bundled-Secret entry for member cluster '${member_name}' (file provider)."
+        if [[ "${in_labeled}" == "true" ]]; then
+            echo "Note: the kubeconfig-provider entry for '${member_name}' remains; the cluster is still registered via the kubeconfig provider."
+        fi
+    fi
+    if [[ "${delete_labeled}" == "true" ]]; then
+        kubectl -n "${namespace}" --context="${keda_context}" delete secret "${member_name}"
+        echo "Removed labeled Secret '${member_name}' (kubeconfig provider)."
+        if [[ "${in_bundled}" == "true" ]]; then
+            echo "Note: the file-provider entry for '${member_name}' remains; the cluster is still registered via the file provider."
+        fi
+    fi
 }
 
 function multicluster::__setup_member() {

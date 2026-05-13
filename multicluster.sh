@@ -190,7 +190,7 @@ function multicluster::__delete_member() {
     # and the JSON Pointer used in the bundled-Secret patch (where `/` and `~`
     # have special meaning).
     if [[ ! "${member_name}" =~ ^[a-z]([a-z0-9-]*[a-z0-9])?$ ]]; then
-        echo "Member name '${member_name}' contains invalid characters. Only lowercase alphanumeric characters and hyphens are allowed, starting with a letter."
+        echo "Member name '${member_name}' is not a valid DNS label. It must start with a lowercase letter, end with a lowercase letter or digit, and only contain lowercase letters, digits, and hyphens."
         exit 1
     fi
 

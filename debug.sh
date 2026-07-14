@@ -344,27 +344,57 @@ function debug::__get_pod_autoscaler() {
 function debug::__resource_metric_value() {
     local autoscaler="$1"
     local metric="$2"
-    local metric_type="$3"
-    local field=""
+    local container_name="${3:-}"
 
-    case "$metric_type" in
-        Utilization) field="averageUtilization" ;;
-        AverageValue) field="averageValue" ;;
-        Value) field="value" ;;
-		*) return 0 ;;
-    esac
-
-    echo "$autoscaler" | jq --raw-output --arg metric "$metric" --arg field "$field" '
+    echo "$autoscaler" | jq --raw-output --arg metric "$metric" --arg container "$container_name" '
         [
-          .status.currentMetrics[]? |
-          if .resource.name == $metric then
-            .resource.current[$field]
-          elif .containerResource.name == $metric then
-            .containerResource.current[$field]
+          .spec.metrics[]? |
+          if .type == "Resource" and .resource.name == $metric and $container == "" then
+            {
+              source: "resource",
+              targetType: (.resource.target.type // ""),
+              container: ""
+            }
+          elif .type == "ContainerResource" and
+               .containerResource.name == $metric and
+               ($container == "" or .containerResource.container == $container) then
+            {
+              source: "containerResource",
+              targetType: (.containerResource.target.type // ""),
+              container: (.containerResource.container // "")
+            }
           else
             empty
           end
-        ][0] // empty
+        ] as $targets |
+        if ($targets | length) != 1 then
+          empty
+        else
+          $targets[0] as $target |
+          if $target.targetType == "Utilization" then
+            "averageUtilization"
+          elif $target.targetType == "AverageValue" then
+            "averageValue"
+          else
+            empty
+          end as $field |
+          [
+            .status.currentMetrics[]? |
+            if $target.source == "resource" and
+               .type == "Resource" and
+               .resource.name == $metric then
+              .resource.current[$field] // empty
+            elif $target.source == "containerResource" and
+                 .type == "ContainerResource" and
+                 .containerResource.name == $metric and
+                 .containerResource.container == $target.container then
+              .containerResource.current[$field] // empty
+            else
+              empty
+            end
+          ] |
+          if length == 1 then .[0] else empty end
+        end
     '
 }
 
@@ -385,6 +415,7 @@ function debug::__scaledobject() {
     local so="$1"
     local output_type="$2"
     local print_namespace="$3"
+    local continue_on_resolution_error="${4:-false}"
 
     local so_name=""
     local hpa_name=""
@@ -397,7 +428,7 @@ function debug::__scaledobject() {
     local trigger_type=""
     local trigger_name=""
     local metric=""
-    local metricType=""
+    local container_name=""
     local hasStatusCurrentMetrics=""
     local val=""
     local hpa_index=0
@@ -409,7 +440,13 @@ function debug::__scaledobject() {
     hpa_name=$(echo "$so" | jq --raw-output '.status.hpaName')
     namespace=$(echo "$so" | jq --raw-output '.metadata.namespace')
     autoscaling_class=$(echo "$so" | jq --raw-output '.metadata.annotations["autoscaling.kedify.io/class"] // ""')
-    hpa=$(debug::__get_pod_autoscaler "$namespace" "$hpa_name" "$autoscaling_class")
+    if ! hpa=$(debug::__get_pod_autoscaler "$namespace" "$hpa_name" "$autoscaling_class"); then
+        echo "Unable to inspect ScaledObject '$namespace/$so_name': its generated pod autoscaler could not be resolved" >&2
+        if [[ "$continue_on_resolution_error" == "true" ]]; then
+            return 0
+        fi
+        return 1
+    fi
     autoscaler_kind=$(echo "$hpa" | jq --raw-output '.kind')
     default_trigger_name="$(debug::__no_trigger "$output_type")"
     trigger_count=$(echo "$so" | jq --raw-output '.spec.triggers | length')
@@ -419,19 +456,12 @@ function debug::__scaledobject() {
         if [[ "$trigger_type" == "cpu" || "$trigger_type" == "memory" ]]; then
             index_offset=$((index_offset + 1))
             metric=$trigger_type
-			metricType=$(echo "$so" | jq --raw-output ".spec.triggers[$i].metricType // empty")
-			if [[ -z "$metricType" ]]; then
-				if [[ "$trigger_type" == "cpu" ]]; then
-					metricType="Utilization"
-				else
-					metricType="AverageValue"
-				fi
-			fi
+            container_name=$(echo "$so" | jq --raw-output ".spec.triggers[$i].metadata.containerName // empty")
             hasStatusCurrentMetrics=$(echo "$hpa" | jq --raw-output '.status.currentMetrics // [] | length')
             if [[ "$hasStatusCurrentMetrics" -eq 0 ]]; then
                 val="$(debug::__no_value "$output_type")"
             else
-                val=$(debug::__resource_metric_value "$hpa" "$metric" "$metricType")
+                val=$(debug::__resource_metric_value "$hpa" "$metric" "$container_name")
                 [[ -n "$val" ]] || val="$(debug::__no_value "$output_type")"
             fi
         else
@@ -626,8 +656,8 @@ function debug::__execute_scaledobject_once() {
     case $kind in
         "List")
             echo "$output" | jq -c '.items[]' | while read -r item; do
-            debug::__scaledobject "$item" "$output_type" "$print_namespace"
-        done
+                debug::__scaledobject "$item" "$output_type" "$print_namespace" true
+            done
         ;;
     "ScaledObject")
         debug::__scaledobject "$output" "$output_type" "$print_namespace"

@@ -6,6 +6,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOCK_MODE=""
 REAL_JQ_BIN=""
 
+function mock_kpa_status() {
+    cat <<'EOF'
+{"apiVersion":"autoscaling.kedify.io/v1alpha1","kind":"KedifyPodAutoscaler","spec":{"metrics":[{"type":"External","external":{"metric":{"name":"queue_depth"},"target":{"type":"AverageValue","averageValue":"5"}}},{"type":"Resource","resource":{"name":"cpu","target":{"type":"AverageValue","averageValue":"200m"}}},{"type":"ContainerResource","containerResource":{"name":"memory","container":"worker","target":{"type":"Utilization","averageUtilization":75}}}]},"status":{"currentMetrics":[{"type":"Resource","resource":{"name":"cpu","current":{"averageUtilization":55,"averageValue":"100m"}}},{"type":"ContainerResource","containerResource":{"name":"memory","container":"worker","current":{"averageUtilization":66,"averageValue":"128Mi"}}},{"type":"External","external":{"metric":{"name":"queue_depth"},"current":{"averageValue":"7"}}}]}}
+EOF
+}
+
 function kubectl() {
     local args="$*"
 
@@ -51,11 +57,28 @@ function kubectl() {
                 return 1
             fi
             if [[ "$args" == "get kedifypodautoscalers.autoscaling.kedify.io keda-hpa-orders -n tenant-a -o json" ]]; then
-                cat <<'EOF'
-{"apiVersion":"autoscaling.kedify.io/v1alpha1","kind":"KedifyPodAutoscaler","spec":{"metrics":[{"type":"External","external":{"metric":{"name":"queue_depth"}}}]},"status":{"currentMetrics":[{"type":"Resource","resource":{"name":"cpu","current":{"averageUtilization":55,"averageValue":"100m"}}},{"type":"ContainerResource","containerResource":{"name":"memory","container":"worker","current":{"averageValue":"128Mi"}}},{"type":"External","external":{"metric":{"name":"queue_depth"},"current":{"averageValue":"7"}}}]}}
-EOF
+                mock_kpa_status
                 return 0
             fi
+            ;;
+        scaledobject_list_resolution)
+            case "$args" in
+                "get scaledobjects -o json")
+                    cat <<'EOF'
+{"apiVersion":"keda.sh/v1alpha1","kind":"List","items":[{"metadata":{"name":"missing","namespace":"tenant-a","annotations":{"autoscaling.kedify.io/class":"kpa"}},"status":{"hpaName":"keda-hpa-missing"},"spec":{"triggers":[{"type":"cpu"}]}},{"metadata":{"name":"orders","namespace":"tenant-a","annotations":{"autoscaling.kedify.io/class":"kpa"}},"status":{"hpaName":"keda-hpa-orders"},"spec":{"triggers":[{"type":"cpu"}]}}]}
+EOF
+                    return 0
+                    ;;
+                "get horizontalpodautoscalers.autoscaling keda-hpa-missing -n tenant-a -o json"|\
+                "get kedifypodautoscalers.autoscaling.kedify.io keda-hpa-missing -n tenant-a -o json"|\
+                "get horizontalpodautoscalers.autoscaling keda-hpa-orders -n tenant-a -o json")
+                    return 1
+                    ;;
+                "get kedifypodautoscalers.autoscaling.kedify.io keda-hpa-orders -n tenant-a -o json")
+                    mock_kpa_status
+                    return 0
+                    ;;
+            esac
             ;;
         kpa_warning)
 			if [[ "$args" == "get horizontalpodautoscalers.autoscaling keda-hpa-orders -n tenant-a -o json" ]]; then
@@ -211,24 +234,44 @@ function test_debug_resolution() {
 }
 
 function test_kpa_status_metrics() {
-    local so='{"metadata":{"name":"orders","namespace":"tenant-a","annotations":{"autoscaling.kedify.io/class":"kpa"}},"status":{"hpaName":"keda-hpa-orders"},"spec":{"triggers":[{"type":"cpu","metricType":"Utilization"},{"type":"memory","metricType":"AverageValue"},{"type":"rabbitmq","name":"queue","metricType":"AverageValue"}]}}'
+    local so='{"metadata":{"name":"orders","namespace":"tenant-a","annotations":{"autoscaling.kedify.io/class":"kpa"}},"status":{"hpaName":"keda-hpa-orders"},"spec":{"triggers":[{"type":"cpu","metricType":"AverageValue"},{"type":"memory","metricType":"Utilization","metadata":{"containerName":"worker"}},{"type":"rabbitmq","name":"queue","metricType":"AverageValue"}]}}'
     local output=""
 
     MOCK_MODE="kpa_status"
     output=$(debug::__scaledobject "$so" json false)
-    assert_contains "$output" '"metric":"cpu","value":55'
-    assert_contains "$output" '"metric":"memory","value":"128Mi"'
+    assert_contains "$output" '"metric":"cpu","value":"100m"'
+    assert_contains "$output" '"metric":"memory","value":66'
     assert_contains "$output" '"metric":"queue_depth","value":7'
 
-	so='{"metadata":{"name":"orders","namespace":"tenant-a","annotations":{"autoscaling.kedify.io/class":"kpa"}},"status":{"hpaName":"keda-hpa-orders"},"spec":{"triggers":[{"type":"cpu"},{"type":"memory"}]}}'
-	output=$(debug::__scaledobject "$so" json false)
-	assert_contains "$output" '"metric":"cpu","value":55'
-	assert_contains "$output" '"metric":"memory","value":"128Mi"'
+    so='{"metadata":{"name":"orders","namespace":"tenant-a","annotations":{"autoscaling.kedify.io/class":"kpa"}},"status":{"hpaName":"keda-hpa-orders"},"spec":{"triggers":[{"type":"cpu"},{"type":"memory","metadata":{"containerName":"worker"}}]}}'
+    output=$(debug::__scaledobject "$so" json false)
+    assert_contains "$output" '"metric":"cpu","value":"100m"'
+    assert_contains "$output" '"metric":"memory","value":66'
 
-	if [[ -n "$(debug::__resource_metric_value '{}' cpu Unsupported)" ]]; then
-		echo 'unsupported resource metric type returned a value' >&2
-		return 1
-	fi
+    if [[ -n "$(debug::__resource_metric_value '{"spec":{"metrics":[]}}' cpu)" ]]; then
+        echo 'resource metric without a resolvable spec target returned a value' >&2
+        return 1
+    fi
+}
+
+function test_scaledobject_list_continues_after_resolution_error() {
+    local error_file=""
+    local output=""
+    error_file=$(mktemp)
+    trap 'rm -f "$error_file"' RETURN
+
+    MOCK_MODE="scaledobject_list_resolution"
+    output=$(debug::__execute_scaledobject_once json false 2>"$error_file")
+
+    assert_contains "$(cat "$error_file")" "Unable to inspect ScaledObject 'tenant-a/missing'"
+    assert_contains "$output" '"name": "orders"'
+    if [[ "$output" == *'"name": "missing"'* ]]; then
+        echo 'unresolved ScaledObject unexpectedly produced structured output' >&2
+        return 1
+    fi
+
+    rm -f "$error_file"
+    trap - RETURN
 }
 
 function test_dump_collection() {
@@ -336,6 +379,7 @@ function main() {
 
     test_debug_resolution
     test_kpa_status_metrics
+    test_scaledobject_list_continues_after_resolution_error
     test_dump_collection
     test_optional_absence
 	test_kubectl_count_ignores_empty_list_messages

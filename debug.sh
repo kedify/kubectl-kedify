@@ -371,13 +371,13 @@ function debug::__resource_metric_value() {
           empty
         else
           $targets[0] as $target |
-          if $target.targetType == "Utilization" then
-            "averageUtilization"
-          elif $target.targetType == "AverageValue" then
-            "averageValue"
-          else
-            empty
-          end as $field |
+          (if $target.targetType == "Utilization" then
+             "averageUtilization"
+           elif $target.targetType == "AverageValue" then
+             "averageValue"
+           else
+             empty
+           end) as $field |
           [
             .status.currentMetrics[]? |
             if $target.source == "resource" and

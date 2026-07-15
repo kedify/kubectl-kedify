@@ -275,6 +275,16 @@ test_dependencies() {
     done
 }
 
+test_kpa_support() {
+    print_test "Testing optional KPA diagnostics..."
+    if /bin/bash ./test-kpa.sh >/dev/null; then
+        print_pass "Optional KPA diagnostics passed"
+    else
+        print_fail "Optional KPA diagnostics failed"
+        return 1
+    fi
+}
+
 test_platform_detection() {
     print_test "Testing platform-specific functionality..."
     
@@ -388,6 +398,7 @@ run_smoke_tests() {
     test_executability || true
     test_function_loading || true
     test_dependencies || true
+    test_kpa_support || true
 }
 
 run_full_tests() {

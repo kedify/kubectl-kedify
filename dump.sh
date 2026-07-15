@@ -31,6 +31,8 @@ function dump::__read_lines_into_array() {
 
     eval "$array_name=()"
     while IFS= read -r line || [[ -n "$line" ]]; do
+        # Native Windows tools emit CRLF even when invoked from Git Bash.
+        line="${line%$'\r'}"
         [[ -z "$line" ]] && continue
         eval "$array_name+=(\"\$line\")"
     done
@@ -39,7 +41,7 @@ function dump::__read_lines_into_array() {
 function dump::__kubectl_count() {
     local count="0"
 
-    if count=$(kubectl "$@" --no-headers 2>/dev/null | wc -l | awk '{print $1}'); then
+    if count=$(kubectl "$@" -o name 2>/dev/null | wc -l | awk '{print $1}'); then
         printf '%s\n' "$count"
     else
         echo "0"
@@ -116,7 +118,7 @@ Usage: kubectl kedify dump [options]
 
 Collects comprehensive diagnostic information from Kedify/KEDA components including:
 - Cluster-wide information (nodes, autoscaler data, resource allocation)
-- Namespace-specific data (events, scaling resources, pod logs)
+- Namespace-specific data (events, HPA/KPA scaling resources, pod logs)
 - Kedify/KEDA component configurations and status
 
 Options:
@@ -461,6 +463,142 @@ function dump::__collect_http_addon_queue_data() {
     trap - INT TERM EXIT
 }
 
+function dump::__collect_kpa_crd() {
+    local base_dir="$1"
+    local output_file="${base_dir}/kpa-crd.yaml"
+
+    if kubectl get crd kedifypodautoscalers.autoscaling.kedify.io -o yaml > "$output_file" 2>/dev/null; then
+        dump::__print_status "\033[32m✓ KPA CRD collected\033[0m"
+    else
+        # KPA is optional and cluster-scoped CRD reads may be restricted.
+        rm -f "$output_file"
+        dump::__print_status "\033[90m- KPA CRD unavailable or not readable\033[0m"
+    fi
+}
+
+function dump::__collect_kpa_data() {
+    local ns="$1"
+    local ns_dir="$2"
+    local selector="app.kubernetes.io/part-of=kedify-pod-autoscaler"
+    local kpa_json=""
+
+    if kpa_json=$(kubectl get kedifypodautoscalers.autoscaling.kedify.io -n "$ns" -o json 2>/dev/null); then
+        if echo "$kpa_json" | jq -e '.items | length > 0' >/dev/null; then
+            kubectl get kedifypodautoscalers.autoscaling.kedify.io -n "$ns" -o yaml > "${ns_dir}/kpa.yaml" 2>/dev/null || rm -f "${ns_dir}/kpa.yaml"
+            kubectl get events -n "$ns" --field-selector involvedObject.kind=KedifyPodAutoscaler --sort-by='.lastTimestamp' -o yaml > "${ns_dir}/kpa-events.yaml" 2>/dev/null || rm -f "${ns_dir}/kpa-events.yaml"
+            dump::__print_status "  \033[90m- KPA objects found; object and event collection attempted\033[0m"
+        else
+            dump::__print_status "  \033[90m- No KPA objects found\033[0m"
+        fi
+    else
+        # A missing CRD and forbidden resource access are both expected for optional KPA.
+        dump::__print_status "  \033[90m- KPA objects unavailable or not readable\033[0m"
+    fi
+
+    local resource=""
+    local output_name=""
+    for resource in deployments services endpoints endpointslices.discovery.k8s.io; do
+        case "$resource" in
+            deployments) output_name="kpa-controller-deployments.yaml" ;;
+            services) output_name="kpa-services.yaml" ;;
+            endpoints) output_name="kpa-endpoints.yaml" ;;
+            endpointslices.discovery.k8s.io) output_name="kpa-endpointslices.yaml" ;;
+        esac
+
+        if kubectl get "$resource" -n "$ns" -l "$selector" -o name 2>/dev/null | grep -q .; then
+            kubectl get "$resource" -n "$ns" -l "$selector" -o yaml > "${ns_dir}/${output_name}" 2>/dev/null || rm -f "${ns_dir}/${output_name}"
+        fi
+    done
+
+    local deployments_json=""
+    deployments_json=$(kubectl get deployments -n "$ns" -l "$selector" -o json 2>/dev/null) || deployments_json=""
+    local discovered_pods=()
+    local selector_pods=()
+    local pod=""
+    if [[ -n "$deployments_json" ]] && echo "$deployments_json" | jq -e '.items | length > 0' >/dev/null; then
+        local deployment_name=""
+        local deployment_uid=""
+        local deployment_selector=""
+        local deployment_line=""
+        while IFS= read -r deployment_line; do
+            deployment_line="${deployment_line%$'\r'}"
+            IFS=$'\t' read -r deployment_name deployment_uid deployment_selector <<< "$deployment_line"
+            [[ -n "$deployment_name" && -n "$deployment_uid" && -n "$deployment_selector" ]] || continue
+
+            local replica_sets_json=""
+            replica_sets_json=$(kubectl get replicasets -n "$ns" -l "$deployment_selector" -o json 2>/dev/null) || replica_sets_json=""
+            [[ -n "$replica_sets_json" ]] || continue
+
+            local pods_json=""
+            pods_json=$(kubectl get pods -n "$ns" -l "$deployment_selector" -o json 2>/dev/null) || pods_json=""
+            [[ -n "$pods_json" ]] || continue
+
+            local replica_set_name=""
+            local replica_set_uid=""
+            local replica_set_line=""
+            while IFS= read -r replica_set_line; do
+                replica_set_line="${replica_set_line%$'\r'}"
+                IFS=$'\t' read -r replica_set_name replica_set_uid <<< "$replica_set_line"
+                [[ -n "$replica_set_name" && -n "$replica_set_uid" ]] || continue
+                dump::__read_lines_into_array selector_pods < <(
+                    echo "$pods_json" | jq -r --arg name "$replica_set_name" --arg uid "$replica_set_uid" '
+                        .items[] |
+                        select(any(.metadata.ownerReferences[]?; .controller == true and .kind == "ReplicaSet" and .name == $name and .uid == $uid)) |
+                        .metadata.name
+                    '
+                )
+                if [[ ${#selector_pods[@]} -gt 0 ]]; then
+                    discovered_pods+=("${selector_pods[@]}")
+                fi
+            done < <(
+                echo "$replica_sets_json" | jq -r --arg name "$deployment_name" --arg uid "$deployment_uid" '
+                    .items[] |
+                    select(any(.metadata.ownerReferences[]?; .controller == true and .kind == "Deployment" and .name == $name and .uid == $uid)) |
+                    [.metadata.name, .metadata.uid] | @tsv
+                '
+            )
+        done < <(
+            echo "$deployments_json" |
+                jq -r '
+                    .items[] |
+                    [
+                      .metadata.name,
+                      .metadata.uid,
+                      ((.spec.selector.matchLabels // {}) | to_entries | map("\(.key)=\(.value)") | join(","))
+                    ] | @tsv
+                '
+        )
+    fi
+
+    local kpa_pods=()
+    if [[ ${#discovered_pods[@]} -gt 0 ]]; then
+        dump::__read_lines_into_array kpa_pods < <(printf '%s\n' "${discovered_pods[@]}" | sort -u)
+    fi
+    if [[ ${#kpa_pods[@]} -gt 0 ]]; then
+        for pod in "${kpa_pods[@]}"; do
+            kubectl get pod -n "$ns" "$pod" -o yaml > "${ns_dir}/kpa-${pod}-pod.yaml" 2>/dev/null || rm -f "${ns_dir}/kpa-${pod}-pod.yaml"
+            kubectl describe pod -n "$ns" "$pod" > "${ns_dir}/kpa-${pod}-pod.describe.txt" 2>/dev/null || rm -f "${ns_dir}/kpa-${pod}-pod.describe.txt"
+            kubectl logs -n "$ns" "$pod" > "${ns_dir}/kpa-${pod}-logs.txt" 2>/dev/null || rm -f "${ns_dir}/kpa-${pod}-logs.txt"
+            kubectl logs -n "$ns" "$pod" --previous > "${ns_dir}/kpa-${pod}-logs-previous.txt" 2>/dev/null || rm -f "${ns_dir}/kpa-${pod}-logs-previous.txt"
+        done
+    fi
+
+    local kpa_services=()
+    local service=""
+    dump::__read_lines_into_array kpa_services < <(kubectl get services -n "$ns" -l "$selector" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n')
+    if [[ ${#kpa_services[@]} -gt 0 ]]; then
+        for service in "${kpa_services[@]}"; do
+            # Use the API server Service proxy so diagnostics do not need local ports
+            # or direct network reachability into tenant namespaces.
+            kubectl get --raw "/api/v1/namespaces/${ns}/services/http:${service}:metrics/proxy/metrics" > "${ns_dir}/kpa-${service}-metrics.txt" 2>/dev/null || rm -f "${ns_dir}/kpa-${service}-metrics.txt"
+        done
+    fi
+
+    if [[ ${#kpa_pods[@]} -gt 0 || ${#kpa_services[@]} -gt 0 ]]; then
+        dump::__print_status "  \033[90m- KPA controller resources found; diagnostic collection attempted\033[0m"
+    fi
+}
+
 function dump::__collect_namespace_data() {
     local ns="$1"
     local base_dir="$2"
@@ -715,7 +853,7 @@ function dump::__collect_namespace_data() {
         fi
     fi
 
-    # Collect ScaledObjects, HPAs, ScaledJobs, HTTPScaledObjects, and Kedify resources from this namespace
+    # Collect ScaledObjects, pod autoscalers, ScaledJobs, HTTPScaledObjects, and Kedify resources from this namespace
     dump::__print_status "\033[36mCollecting scaling resources...\033[0m"
     
     # ScaledObjects (only if CRD exists)
@@ -741,6 +879,9 @@ function dump::__collect_namespace_data() {
     else
         dump::__print_status "  \033[90m- No HPAs found\033[0m"
     fi
+
+    # KPA is optional; absence of its CRD or read permission must not abort a dump.
+    dump::__collect_kpa_data "$ns" "$ns_dir"
     
     # ScaledJobs (only if CRD exists)
     if kubectl get crd scaledjobs.keda.sh >/dev/null 2>&1; then
@@ -1118,6 +1259,7 @@ Cluster-wide Files (_cluster-info/):
 - cluster-nodes-resource-usage.txt        ... CPU/Memory usage for all nodes
 - cluster-nodes.yaml                      ... Complete node specifications and status
 - cluster-node-*-describe.txt             ... Detailed node descriptions (conditions, taints, allocations)
+- kpa-crd.yaml                            ... KedifyPodAutoscaler CRD (when readable)
 EOF
 
             # Add conditional cluster files
@@ -1175,6 +1317,16 @@ Per-namespace Files:
 - events.yaml                             ... Kubernetes events for the namespace
 - scaledobjects.yaml                      ... ScaledObject resources (if any)
 - hpa.yaml                                ... HorizontalPodAutoscaler resources (if any)
+- kpa.yaml                                ... KedifyPodAutoscaler resources (if any)
+- kpa-events.yaml                         ... Events involving KedifyPodAutoscaler resources
+- kpa-controller-deployments.yaml         ... KPA controller Deployments
+- kpa-services.yaml                       ... KPA controller Services and metrics endpoint configuration
+- kpa-endpoints.yaml                      ... KPA Service endpoint state
+- kpa-endpointslices.yaml                 ... KPA Service EndpointSlice state
+- kpa-*-pod.yaml                          ... KPA controller pod manifests
+- kpa-*-pod.describe.txt                  ... KPA controller pod descriptions
+- kpa-*-logs*.txt                         ... Current and previous KPA controller logs
+- kpa-*-metrics.txt                       ... KPA Prometheus metrics collected through the Service proxy
 - scaledjobs.yaml                         ... ScaledJob resources (if any)
 - httpscaledobjects.yaml                  ... HTTPScaledObject resources (if any)
 - httpscaledobjects-services.yaml         ... Services referenced by HTTPScaledObjects (if any)
@@ -1437,7 +1589,7 @@ function dump::__cmd_impl() {
     dump::__print_status ""
     dump::__print_status "\033[36mOutput directory:\033[0m $tempdir"
     dump::__print_status "\033[36mKubectl context:\033[0m $(kubectl config current-context)"
-    
+
     # Determine installation namespace (where Kedify/KEDA is installed)
     local installation_ns=""
     if kubectl get crd kedifyconfigurations.install.kedify.io >/dev/null 2>&1 && kubectl get kedifyconfigurations -A > /dev/null 2>&1; then
@@ -1486,6 +1638,9 @@ function dump::__cmd_impl() {
         # Create cluster information directory
         cluster_dir="${tempdir}/_cluster-info"
         mkdir -p "$cluster_dir"
+
+        dump::__print_status "\033[36mCollecting KPA CRD...\033[0m"
+        dump::__collect_kpa_crd "$cluster_dir"
         
         # Node Information Section
         dump::__print_status "\033[36mCollecting node information...\033[0m"
@@ -1756,6 +1911,8 @@ function dump::__cmd_impl() {
             local has_predictor
             local has_so=0
             local has_hpa=0
+            local has_kpa=0
+            local has_kpa_controller=0
             local has_sj=0
             local has_hso=0
 
@@ -1769,6 +1926,10 @@ function dump::__cmd_impl() {
             
             # Check for HPAs
             has_hpa=$(dump::__kubectl_count get hpa -n "$ns")
+
+            # Check optional KPA objects and controller pods without requiring CRD discovery permission.
+            has_kpa=$(dump::__kubectl_count get kedifypodautoscalers.autoscaling.kedify.io -n "$ns")
+            has_kpa_controller=$(dump::__kubectl_count get deployments -n "$ns" -l app.kubernetes.io/part-of=kedify-pod-autoscaler)
             
             # Check for ScaledJobs (only if CRD exists)
             if kubectl get crd scaledjobs.keda.sh >/dev/null 2>&1; then
@@ -1781,7 +1942,7 @@ function dump::__cmd_impl() {
             fi
             
             # Skip if no relevant resources
-            if [[ "$has_proxy" -eq 0 && "$has_predictor" -eq 0 && "$has_so" -eq 0 && "$has_hpa" -eq 0 && "$has_sj" -eq 0 && "$has_hso" -eq 0 ]]; then
+            if [[ "$has_proxy" -eq 0 && "$has_predictor" -eq 0 && "$has_so" -eq 0 && "$has_hpa" -eq 0 && "$has_kpa" -eq 0 && "$has_kpa_controller" -eq 0 && "$has_sj" -eq 0 && "$has_hso" -eq 0 ]]; then
                 continue
             fi
         fi

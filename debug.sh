@@ -100,7 +100,7 @@ function debug::__print_usage() {
 Usage: kubectl kedify debug <command> [options]
 
 Available commands:
-  so/scaledobject       Inspect ScaledObject resource
+  so/scaledobject       Inspect ScaledObject metrics through its generated HPA or KPA
   httpaddon             Verify HTTP Addon setup and current configuration
 
 Options:
@@ -248,10 +248,174 @@ function debug::__no_trigger() {
     esac
 }
 
+function debug::__get_pod_autoscaler() {
+    local namespace="$1"
+    local autoscaler_name="$2"
+    local preferred_class="${3:-}"
+    local hpa=""
+    local kpa=""
+    local hpa_error=""
+    local kpa_error=""
+	local error_dir=""
+
+    if [[ -z "$autoscaler_name" || "$autoscaler_name" == "null" ]]; then
+        echo "ScaledObject status.hpaName is not set" >&2
+        return 1
+    fi
+
+	error_dir=$(mktemp -d)
+	if hpa=$(kubectl get horizontalpodautoscalers.autoscaling "$autoscaler_name" -n "$namespace" -o json 2>"${error_dir}/hpa"); then
+		hpa_error=$(<"${error_dir}/hpa")
+		[[ -z "$hpa_error" ]] || printf '%s\n' "$hpa_error" >&2
+	else
+		hpa_error=$(<"${error_dir}/hpa")
+        hpa=""
+    fi
+
+    # KPA deliberately uses the HPA-compatible autoscaling/v2 spec/status shape,
+    # so the remaining debug logic can consume either resource without a private client.
+	if kpa=$(kubectl get kedifypodautoscalers.autoscaling.kedify.io "$autoscaler_name" -n "$namespace" -o json 2>"${error_dir}/kpa"); then
+		kpa_error=$(<"${error_dir}/kpa")
+		[[ -z "$kpa_error" ]] || printf '%s\n' "$kpa_error" >&2
+	else
+		kpa_error=$(<"${error_dir}/kpa")
+        kpa=""
+    fi
+	rm -f "${error_dir}/hpa" "${error_dir}/kpa"
+	rmdir "$error_dir"
+
+    if [[ -n "$hpa" && -n "$kpa" ]]; then
+        echo "Both HPA and KPA '$autoscaler_name' exist in namespace '$namespace'; remove the stale autoscaler before debugging metrics" >&2
+        return 1
+    fi
+
+    if [[ -n "$hpa" ]]; then
+        case "$kpa_error" in
+            *Forbidden*|*forbidden*|*Unauthorized*|*unauthorized*)
+                echo "Warning: KPA lookup was forbidden; a same-named KPA conflict cannot be excluded" >&2
+                ;;
+        esac
+    fi
+    if [[ -n "$kpa" ]]; then
+        case "$hpa_error" in
+            *Forbidden*|*forbidden*|*Unauthorized*|*unauthorized*)
+                echo "Warning: HPA lookup was forbidden; a same-named HPA conflict cannot be excluded" >&2
+                ;;
+        esac
+    fi
+
+    case "$preferred_class" in
+        hpa)
+            if [[ -z "$hpa" ]]; then
+                echo "ScaledObject selects HPA '$autoscaler_name', but it was not found or is not readable in namespace '$namespace'" >&2
+                [[ -n "$hpa_error" ]] && echo "HPA lookup: $hpa_error" >&2
+                return 1
+            fi
+            printf '%s\n' "$hpa"
+            return 0
+            ;;
+        kpa)
+            if [[ -z "$kpa" ]]; then
+                echo "ScaledObject selects KPA '$autoscaler_name', but it was not found or is not readable in namespace '$namespace'" >&2
+                [[ -n "$kpa_error" ]] && echo "KPA lookup: $kpa_error" >&2
+                return 1
+            fi
+            printf '%s\n' "$kpa"
+            return 0
+            ;;
+    esac
+
+    if [[ -n "$kpa" ]]; then
+        printf '%s\n' "$kpa"
+        return 0
+    fi
+
+    if [[ -n "$hpa" ]]; then
+        printf '%s\n' "$hpa"
+        return 0
+    fi
+
+    echo "Pod autoscaler '$autoscaler_name' was not found or is not readable as an HPA or KPA in namespace '$namespace'" >&2
+    [[ -n "$hpa_error" ]] && echo "HPA lookup: $hpa_error" >&2
+    [[ -n "$kpa_error" ]] && echo "KPA lookup: $kpa_error" >&2
+    return 1
+}
+
+function debug::__resource_metric_value() {
+    local autoscaler="$1"
+    local metric="$2"
+    local container_name="${3:-}"
+
+    echo "$autoscaler" | jq --raw-output --arg metric "$metric" --arg container "$container_name" '
+        [
+          .spec.metrics[]? |
+          if .type == "Resource" and .resource.name == $metric and $container == "" then
+            {
+              source: "resource",
+              targetType: (.resource.target.type // ""),
+              container: ""
+            }
+          elif .type == "ContainerResource" and
+               .containerResource.name == $metric and
+               ($container == "" or .containerResource.container == $container) then
+            {
+              source: "containerResource",
+              targetType: (.containerResource.target.type // ""),
+              container: (.containerResource.container // "")
+            }
+          else
+            empty
+          end
+        ] as $targets |
+        if ($targets | length) != 1 then
+          empty
+        else
+          $targets[0] as $target |
+          (if $target.targetType == "Utilization" then
+             "averageUtilization"
+           elif $target.targetType == "AverageValue" then
+             "averageValue"
+           else
+             empty
+           end) as $field |
+          [
+            .status.currentMetrics[]? |
+            if $target.source == "resource" and
+               .type == "Resource" and
+               .resource.name == $metric then
+              .resource.current[$field] // empty
+            elif $target.source == "containerResource" and
+                 .type == "ContainerResource" and
+                 .containerResource.name == $metric and
+                 .containerResource.container == $target.container then
+              .containerResource.current[$field] // empty
+            else
+              empty
+            end
+          ] |
+          if length == 1 then .[0] else empty end
+        end
+    '
+}
+
+function debug::__external_metric_value() {
+    local autoscaler="$1"
+    local metric="$2"
+
+    echo "$autoscaler" | jq --raw-output --arg metric "$metric" '
+        [
+          .status.currentMetrics[]? |
+          select(.external.metric.name == $metric) |
+          (.external.current.averageValue // .external.current.value // empty)
+        ][0] // empty
+    '
+}
+
 function debug::__scaledobject() {
     local so="$1"
     local output_type="$2"
     local print_namespace="$3"
+    local continue_on_resolution_error="${4:-false}"
 
     local so_name=""
     local hpa_name=""
@@ -264,16 +428,26 @@ function debug::__scaledobject() {
     local trigger_type=""
     local trigger_name=""
     local metric=""
-    local metricType=""
+    local container_name=""
     local hasStatusCurrentMetrics=""
     local val=""
     local hpa_index=0
     local api=""
+    local autoscaling_class=""
+    local autoscaler_kind=""
 
     so_name=$(echo "$so" | jq --raw-output '.metadata.name')
     hpa_name=$(echo "$so" | jq --raw-output '.status.hpaName')
     namespace=$(echo "$so" | jq --raw-output '.metadata.namespace')
-    hpa=$(kubectl get hpa "$hpa_name" -n "$namespace" -o json)
+    autoscaling_class=$(echo "$so" | jq --raw-output '.metadata.annotations["autoscaling.kedify.io/class"] // ""')
+    if ! hpa=$(debug::__get_pod_autoscaler "$namespace" "$hpa_name" "$autoscaling_class"); then
+        echo "Unable to inspect ScaledObject '$namespace/$so_name': its generated pod autoscaler could not be resolved" >&2
+        if [[ "$continue_on_resolution_error" == "true" ]]; then
+            return 0
+        fi
+        return 1
+    fi
+    autoscaler_kind=$(echo "$hpa" | jq --raw-output '.kind')
     default_trigger_name="$(debug::__no_trigger "$output_type")"
     trigger_count=$(echo "$so" | jq --raw-output '.spec.triggers | length')
     while [[ $i -lt $trigger_count ]]; do
@@ -282,18 +456,24 @@ function debug::__scaledobject() {
         if [[ "$trigger_type" == "cpu" || "$trigger_type" == "memory" ]]; then
             index_offset=$((index_offset + 1))
             metric=$trigger_type
-            metricType=$(echo "$so" | jq --raw-output ".spec.triggers[$i].metricType")
-            hasStatusCurrentMetrics=$(echo "$hpa" | jq --raw-output '.status.currentMetrics | length')
+            container_name=$(echo "$so" | jq --raw-output ".spec.triggers[$i].metadata.containerName // empty")
+            hasStatusCurrentMetrics=$(echo "$hpa" | jq --raw-output '.status.currentMetrics // [] | length')
             if [[ "$hasStatusCurrentMetrics" -eq 0 ]]; then
                 val="$(debug::__no_value "$output_type")"
             else
-                val=$(echo "$hpa" | jq --raw-output ".status.currentMetrics[] | select(.resource.name == \"$metric\") | .resource.current.average$metricType")
+                val=$(debug::__resource_metric_value "$hpa" "$metric" "$container_name")
+                [[ -n "$val" ]] || val="$(debug::__no_value "$output_type")"
             fi
         else
             hpa_index=$((i - index_offset))
             metric=$(echo "$hpa" | jq --raw-output ".spec.metrics[$hpa_index].external.metric.name")
-            api="/apis/external.metrics.k8s.io/v1beta1/namespaces/${namespace}/${metric}?labelSelector=scaledobject.keda.sh%2Fname%3D${so_name}"
-            val=$(kubectl get --raw "$api" | jq --raw-output '.items[].value')
+            if [[ "$autoscaler_kind" == "KedifyPodAutoscaler" ]]; then
+                val=$(debug::__external_metric_value "$hpa" "$metric")
+                [[ -n "$val" ]] || val="$(debug::__no_value "$output_type")"
+            else
+                api="/apis/external.metrics.k8s.io/v1beta1/namespaces/${namespace}/${metric}?labelSelector=scaledobject.keda.sh%2Fname%3D${so_name}"
+                val=$(kubectl get --raw "$api" | jq --raw-output '.items[].value')
+            fi
         fi
         case $output_type in
             json|yaml)
@@ -476,8 +656,8 @@ function debug::__execute_scaledobject_once() {
     case $kind in
         "List")
             echo "$output" | jq -c '.items[]' | while read -r item; do
-            debug::__scaledobject "$item" "$output_type" "$print_namespace"
-        done
+                debug::__scaledobject "$item" "$output_type" "$print_namespace" true
+            done
         ;;
     "ScaledObject")
         debug::__scaledobject "$output" "$output_type" "$print_namespace"

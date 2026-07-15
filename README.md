@@ -19,7 +19,7 @@ Simple TUI based shell script for installing and interfacing with Kedify.
 ### Debug & Analysis Commands
 
 - **debug, dbg** - Provides low-level information regarding Kedify components
-  - `so/scaledobject` - Inspect ScaledObject resource
+  - `so/scaledobject` - Inspect ScaledObject metrics through its generated HPA or Kedify Pod Autoscaler (KPA)
   - `httpaddon` - Verify HTTP Addon setup and current configuration
 
 - **insights, ins** - Analyzes ScaledObjects for potential configuration issues
@@ -32,6 +32,13 @@ Simple TUI based shell script for installing and interfacing with Kedify.
   - Collects namespace-specific data (events, scaling resources, pod logs)
   - Supports output to directory or compressed archive format
   - Use `-c false` or `--collect-cluster-data=false` to skip cluster-wide data collection for faster execution
+  - When KPA is installed, collects its CRD, objects, events, controller resources, logs, endpoint state, and Prometheus metrics
+
+### KPA diagnostics
+
+Kedify KEDA stores the generated pod autoscaler's name in `ScaledObject.status.hpaName` for both autoscaler classes. `kubectl kedify debug scaledobject` resolves that name as a Kubernetes HPA and as an optional `autoscaling.kedify.io/v1alpha1` `KedifyPodAutoscaler`. An explicit `autoscaling.kedify.io/class` requires that exact kind to be readable, and any dual-kind coexistence is reported as a conflict instead of showing potentially stale metrics. KPA metric values come directly from its Resource, ContainerResource, and External status entries, without depending on the Kubernetes external metrics adapter. This makes the command safe during HPA-to-KPA class transitions without requiring the private KPA Go API.
+
+`kubectl kedify dump` uses the stable `app.kubernetes.io/part-of=kedify-pod-autoscaler` label to find KPA controller resources across tenant namespaces. Missing KPA CRDs and denied optional KPA reads are reported as unavailable and do not stop the rest of the diagnostic collection.
 
 ## Quick start
 

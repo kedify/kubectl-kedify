@@ -37,8 +37,6 @@ kedify::__resolve_script_path() {
 
 SCRIPT_PATH="$(kedify::__resolve_script_path "$0")"
 DIR="${DIR:-$( cd "$( dirname "${SCRIPT_PATH}" )" && pwd )}"
-# API=${TEMPLATE_FILE:-"https://api.kedify.io"}
-API=${TEMPLATE_FILE:-"https://api.dev.kedify.io"}
 AUTOSCALABLE_RESOURCE_KINDS=(ingress service virtualservice httproute)
 AUTOSCALABLE_RESOURCE_KIND=""
 TEMPLATE_FILE=${TEMPLATE_FILE:-"hso.yaml"}
@@ -124,9 +122,6 @@ main() {
     export KUBECTL
 
     case "${1}" in
-        install|i)
-            install "$@"
-            ;;
         delete|d)
             delete "$@"
             ;;
@@ -236,45 +231,6 @@ check_result() {
     exit 0
 }
 
-install() {
-    if [[ $# -gt 2 ]] && [[ "${2}" == --email ]]; then
-        export EMAIL="${3}"
-    else
-        # ask about email
-        echo "Please enter your email address:"
-        if [[ -n "${BASH_VERSION:-}" ]]; then
-            read -er EMAIL
-        else
-            read -r EMAIL
-        fi
-        export EMAIL
-        [[ -z $EMAIL ]] && echo "Email can't be empty" && exit 1
-    fi
-    set +e
-    AGENT_ID=$(curl -s --request POST --data '{"email": "'"${EMAIL}"'","name":"cli"}' "${API}"/onboarding/create | jq -e -r '.agent_id')
-    retVal=$?
-    [ $retVal -ne 0 ] && echo "Can't create JWT token: $(curl -s --request POST --data '{"email": "'"${EMAIL}"'","name":"cli"}' "${API}"/onboarding/create|jq -C)" && exit 1
-    set -e
-    TOKEN=$(curl -s --request POST --data '{"email": "'"${EMAIL}"'","name":"cli"}' "${API}"/onboarding/create | jq -r '.token')
-    if [[ $- == *i* ]] || kedify::__has_yes_flag "$@"; then
-        _resp="y"
-    else # ask only if shell is interactive or -y was passed
-        printf "Do you want to install Kedify on cluster %s'%s'%s\nHit 'p' for showing the manifests only." \
-            "$COL" "$(kubectl config current-context)" "$RES"
-        echo "[y/N/p]?"
-        kedify::__read_single_char
-        _resp="${REPLY}"
-    fi
-    [[ $_resp =~ [yY] ]] && {
-        # here we apply the manifests
-        kubectl apply -f "${API}/onboarding/agent/${AGENT_ID}?token=${TOKEN}"
-    }
-    [[ $_resp =~ [pP] ]] && {
-        curl -s "${API}/onboarding/agent/${AGENT_ID}?token=${TOKEN}" | ${BAT} --color=always -lyaml
-    }
-    exit 0
-}
-
 status() {
     clear
     figlet kedify status
@@ -319,10 +275,9 @@ delete() {
 print_usage() {
     cat << EOF
 
-Usage: kubectl kedify (i)nstall | (d)elete | (s)tatus | (a)utoscale | (mc)multicluster | (dbg)debug | (ins)ights | (dmp)dump | (h)elp
+Usage: kubectl kedify (d)elete | (s)tatus | (a)utoscale | (mc)multicluster | (dbg)debug | (ins)ights | (dmp)dump | (h)elp
 
 Available commands:
-   install,      i     Installs the Kedify agent
    delete,       d     Uninstalls the Kedify agent
    logs,         l     Prints the logs of Kedify agent
    status,       s     Prints the status of Kedify agent
@@ -336,8 +291,6 @@ Available commands:
    --help,       -h    Shows this help message
 
 Examples:
-   kubectl kedify install                         ... installs the Kedify agent in interactive mode
-   kubectl kedify i --email john.doe@email.com -y ... installs the Kedify agent w/o asking
    kubectl kedify d -y                            ... deletes the Kedify agent w/o asking
    kubectl kedify autoscale                       ... will ask questions
    kubectl kedify autoscale ingress               ... will ask questions about what ingress to autoscale
@@ -349,9 +302,6 @@ Examples:
    kubectl kedify dump                            ... collects debug info from current namespace
    kubectl kedify dmp -A --archive                ... collects debug info from all namespaces as tar.gz
    kubectl kedify dump -o /tmp/debug -n myapp     ... collects debug info from specific namespace
-
-Other env vars that can be passed:
-   API                                            ... defaults to https://api.kedify.io
 
 EOF
 }

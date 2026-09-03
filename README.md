@@ -10,7 +10,6 @@ Simple TUI based shell script for installing and interfacing with Kedify.
 
 ### Core Commands
 
-- **install, i** - Installs the Kedify agent
 - **delete, d** - Uninstalls the Kedify agent
 - **status, s** - Prints the status of Kedify agent
 - **logs, l** - Prints the logs of Kedify agent

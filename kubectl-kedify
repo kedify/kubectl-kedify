@@ -275,7 +275,7 @@ delete() {
 print_usage() {
     cat << EOF
 
-Usage: kubectl kedify (d)elete | (s)tatus | (a)utoscale | (mc)multicluster | (dbg)debug | (ins)ights | (dmp)dump | (h)elp
+Usage: kubectl kedify (d)elete | (s)tatus | (a)utoscale | (mc)multicluster | (dbg)debug | (ins)ights | (dmp)dump | -h|--help
 
 Available commands:
    delete,       d     Uninstalls the Kedify agent

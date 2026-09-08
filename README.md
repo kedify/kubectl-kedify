@@ -10,7 +10,6 @@ Simple TUI based shell script for working with Kedify.
 
 ### Core Commands
 
-- **delete, d** - Uninstalls the Kedify agent
 - **status, s** - Prints the status of Kedify agent
 - **logs, l** - Prints the logs of Kedify agent
 - **autoscale, a** - Runs the interactive mode for creating HTTPScaledObject

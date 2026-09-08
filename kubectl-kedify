@@ -50,16 +50,6 @@ MC_SCRIPT="${DIR}/multicluster.sh"
 VERSION_FILE="${DIR}/VERSION"
 README_FILE="${DIR}/README.md"
 
-kedify::__has_yes_flag() {
-    local arg=""
-    for arg in "$@"; do
-        if [[ "$arg" == "-y" || "$arg" == "--yes" ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
 kedify::__read_single_char() {
     if [[ -n "${ZSH_VERSION:-}" ]]; then
         IFS= read -r -k 1 REPLY
@@ -122,9 +112,6 @@ main() {
     export KUBECTL
 
     case "${1}" in
-        delete|d)
-            delete "$@"
-            ;;
         status|s)
             status
             ;;
@@ -256,29 +243,12 @@ insights() {
     insights::cmd "$@"
 }
 
-delete() {
-    if [[ $- == *i* ]] || kedify::__has_yes_flag "$@"; then
-        _resp="y"
-    else # ask only if shell is interactive or -y was passed
-        printf "Do you want to uninstall Kedify on cluster %s'%s'%s\n" \
-            "$COL" "$(kubectl config current-context)" "$RES"
-        echo "[y/N]?"
-        kedify::__read_single_char
-        _resp="${REPLY}"
-    fi
-    [[ $_resp =~ [yY] ]] && {
-        echo -e "\nDeleting Kedify.."
-        "${KUBECTL}" delete kedifyconfigurations kedify -nkeda
-    }
-}
-
 print_usage() {
     cat << EOF
 
-Usage: kubectl kedify (d)elete | (s)tatus | (a)utoscale | (mc)multicluster | (dbg)debug | (ins)ights | (dmp)dump | -h|--help
+Usage: kubectl kedify (s)tatus | (a)utoscale | (mc)multicluster | (dbg)debug | (ins)ights | (dmp)dump | -h|--help
 
 Available commands:
-   delete,       d     Uninstalls the Kedify agent
    logs,         l     Prints the logs of Kedify agent
    status,       s     Prints the status of Kedify agent
    autoscale,    a     Runs the interactive mode for creating HTTPScaledObject
@@ -291,7 +261,6 @@ Available commands:
    --help,       -h    Shows this help message
 
 Examples:
-   kubectl kedify d -y                            ... deletes the Kedify agent w/o asking
    kubectl kedify autoscale                       ... will ask questions
    kubectl kedify autoscale ingress               ... will ask questions about what ingress to autoscale
    kubectl kedify l -f                            ... prints the logs of Kedify agent and follows them

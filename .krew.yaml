@@ -5,9 +5,11 @@ metadata:
 spec:
   version: "v0.0.12"
   homepage: https://github.com/kedify/kubectl-kedify
-  shortDescription: "Simple TUI based shell script for installing and interfacing with Kedify."
+  shortDescription: "Inspect, troubleshoot, and configure autoscaling with Kedify."
   description: |
-    It asks couple of questions and fill the answers to the proper places for K8s manifests.
+    Provides commands for inspecting Kedify status and logs, configuring HTTP
+    autoscaling, managing multicluster configuration, analyzing scaling
+    configurations, and collecting diagnostic data.
   platforms:
     - selector:
         matchExpressions:

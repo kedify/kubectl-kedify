@@ -1,6 +1,6 @@
 # kubectl-kedify plugin
 
-Simple TUI based shell script for installing and interfacing with Kedify.
+Simple TUI based shell script for working with Kedify.
 
 
 [![Watch the full asciicast](./demo.gif)](https://asciinema.org/a/668253)
@@ -10,8 +10,6 @@ Simple TUI based shell script for installing and interfacing with Kedify.
 
 ### Core Commands
 
-- **install, i** - Installs the Kedify agent
-- **delete, d** - Uninstalls the Kedify agent
 - **status, s** - Prints the status of Kedify agent
 - **logs, l** - Prints the logs of Kedify agent
 - **autoscale, a** - Runs the interactive mode for creating HTTPScaledObject

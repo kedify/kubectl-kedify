@@ -1,6 +1,6 @@
 # kubectl-kedify plugin
 
-Simple TUI based shell script for installing and interfacing with Kedify.
+Simple TUI based shell script for working with Kedify.
 
 
 [![Watch the full asciicast](./demo.gif)](https://asciinema.org/a/668253)
